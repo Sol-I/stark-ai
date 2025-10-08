@@ -41,7 +41,7 @@ def start_telegram_bot():
         add_activity_log("INFO", "Запуск Telegram бота...")
         logger.info("Starting Telegram bot...")
         bot = TelegramBot()
-        bot.run()
+        bot.run()  # Используем синхронный метод run
     except Exception as e:
         error_msg = f"Ошибка Telegram бота: {e}"
         add_activity_log("ERROR", error_msg)

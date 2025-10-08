@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 import asyncio
-from agent_core import AIAgent, get_activity_logs, add_activity_log
+from agent_core import AIAgent, get_activity_logs, add_activity_log, get_llm_metrics_sample
 from config import HOST, PORT
 
 app = FastAPI(title="Stark AI")
@@ -34,6 +34,14 @@ async def clear_history(user_id: str):
 async def get_logs():
     """Endpoint для получения логов"""
     return {"logs": get_activity_logs()}
+
+@app.get("/api/metrics")
+async def get_metrics():
+    """Endpoint для получения метрик LLM"""
+    return {
+        "usage_statistics": agent.get_usage_statistics(),
+        "recent_requests": get_llm_metrics_sample(20)
+    }
 
 @app.get("/")
 async def web_interface():
