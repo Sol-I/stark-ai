@@ -34,6 +34,20 @@ def start_server():
         logger.error(error_msg)
 
 
+def start_telegram_bot():
+    """Запуск Telegram бота в отдельном потоке"""
+    try:
+        from telegram_bot import TelegramBot
+        add_activity_log("INFO", "Запуск Telegram бота...")
+        logger.info("Starting Telegram bot...")
+        bot = TelegramBot()
+        bot.run()
+    except Exception as e:
+        error_msg = f"Ошибка Telegram бота: {e}"
+        add_activity_log("ERROR", error_msg)
+        logger.error(error_msg)
+
+
 async def main():
     """Основная функция запуска агента"""
     add_activity_log("INFO", "Запуск Stark AI Agent")
@@ -59,8 +73,12 @@ async def main():
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
 
-    add_activity_log("INFO", "Ожидание запуска сервера...")
-    logger.info("Ожидаем запуск сервера...")
+    # Запускаем Telegram бота в отдельном потоке
+    telegram_thread = threading.Thread(target=start_telegram_bot, daemon=True)
+    telegram_thread.start()
+
+    add_activity_log("INFO", "Ожидание запуска сервера и бота...")
+    logger.info("Ожидаем запуск сервера и бота...")
     await asyncio.sleep(5)
 
     # Запускаем фоновую проверку моделей (заглушку)
@@ -71,7 +89,7 @@ async def main():
         "✅ Сервер запущен!",
         "🌐 Веб-интерфейс: http://localhost:8000",
         "🌐 Внешний доступ: http://94.228.123.86:8000",
-        "🤖 Telegram бот: активен",
+        "🤖 Telegram бот: ЗАПУЩЕН",
         "🔄 Фоновая проверка моделей: ОТКЛЮЧЕНА",
         "🎯 Логика: последовательный перебор моделей",
         "⏹️  Для остановки: Ctrl+C"
