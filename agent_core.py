@@ -111,7 +111,8 @@ class AIAgent:
             'provider': model['provider'],
             'model_params': model['params'],
             'messages_count': len(messages),
-            'last_user_message': messages[-1]['content'] if messages else '',
+            'last_user_message': messages[-1]['content'][:100] if messages and messages[-1].get('content') else '',
+            # Ограничиваем длину
             'status': 'success',
             'error_type': None,
             'response_time_ms': 0,
@@ -244,10 +245,32 @@ class AIAgent:
         }
 
     async def background_model_checker(self):
-        """Заглушка - фоновая проверка отключена"""
-        add_activity_log("INFO", "Фоновая проверка моделей отключена")
+        """Фоновая проверка доступности моделей"""
+        add_activity_log("INFO", "Фоновая проверка моделей запущена")
         while True:
-            await asyncio.sleep(3600)  # Просто спим
+            try:
+                # Проверяем доступность топ-3 моделей раз в час
+                for i in range(min(3, len(MODEL_RANKING))):
+                    model = MODEL_RANKING[i]
+                    try:
+                        test_message = [{"role": "user", "content": "test"}]
+                        await asyncio.wait_for(
+                            self.client.chat.completions.create(
+                                model=model["name"],
+                                messages=test_message,
+                                max_tokens=5
+                            ),
+                            timeout=10.0
+                        )
+                        add_activity_log("DEBUG", f"Модель {model['name']} доступна")
+                    except Exception:
+                        add_activity_log("DEBUG", f"Модель {model['name']} недоступна")
+
+                await asyncio.sleep(3600)  # Проверяем каждый час
+
+            except Exception as e:
+                add_activity_log("ERROR", f"Ошибка в фоновой проверке: {e}")
+                await asyncio.sleep(300)  # Ждем 5 минут при ошибке
 
     def clear_history(self, user_id: str):
         if user_id in self.conversations:
