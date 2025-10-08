@@ -22,7 +22,6 @@ class TelegramBot:
     def __init__(self, token: str = TELEGRAM_BOT_TOKEN):
         self.token = token
         self.api_url = "http://localhost:8000"
-        self.application = None
         add_activity_log("INFO", "Telegram бот инициализирован")
         logger.info("Telegram бот инициализирован")
 
@@ -67,38 +66,22 @@ class TelegramBot:
             add_activity_log("ERROR", error_msg, f"tg_{user_id}")
             logger.error(f"Ошибка Telegram бота для пользователя {user_id}: {e}")
 
-    def setup_handlers(self):
-        """Настройка обработчиков"""
-        self.application.add_handler(CommandHandler("start", self.start))
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-
-    async def run_async(self):
-        """Асинхронный запуск бота"""
-        try:
-            self.application = Application.builder().token(self.token).build()
-            self.setup_handlers()
-
-            add_activity_log("INFO", "Запуск Telegram бота (async)")
-            logger.info("Telegram bot starting async...")
-
-            await self.application.run_polling()
-
-        except Exception as e:
-            error_msg = f"Критическая ошибка Telegram бота: {e}"
-            add_activity_log("ERROR", error_msg)
-            logger.error(error_msg)
-
     def run(self):
-        """Синхронный запуск бота (для отдельного потока)"""
+        """Запуск бота с созданием своего event loop"""
         try:
-            self.application = Application.builder().token(self.token).build()
-            self.setup_handlers()
+            # Создаем новый event loop для этого потока
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            application = Application.builder().token(self.token).build()
+            application.add_handler(CommandHandler("start", self.start))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
             add_activity_log("INFO", "Запуск Telegram бота")
-            logger.info("Telegram bot started...")
+            logger.info("Telegram bot starting...")
 
-            # Запускаем в отдельном event loop
-            self.application.run_polling()
+            # Запускаем в созданном loop
+            application.run_polling()
 
         except Exception as e:
             error_msg = f"Критическая ошибка Telegram бота: {e}"
