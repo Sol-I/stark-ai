@@ -4,3 +4,10 @@ __pycache__/
 config.py
 *.log
 .DS_Store
+
+# PyCharm
+.idea/
+*.iws
+*.iml
+*.ipr
+misc.xml
