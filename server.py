@@ -4,20 +4,21 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 import asyncio
-from agent_core import AIAgent
+from agent_core import AIAgent, get_activity_logs, add_activity_log
 from config import HOST, PORT
 
 app = FastAPI(title="Stark AI")
 agent = AIAgent()
 
+class MessageRequest(BaseModel):
+    user_id: str
+    message: str
+
 # Запускаем фоновую проверку при старте
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(agent.background_model_checker())
-
-class MessageRequest(BaseModel):
-    user_id: str
-    message: str
+    add_activity_log("INFO", "Сервер запущен")
 
 @app.post("/api/chat")
 async def chat_endpoint(request: MessageRequest):
@@ -28,6 +29,11 @@ async def chat_endpoint(request: MessageRequest):
 async def clear_history(user_id: str):
     agent.clear_history(user_id)
     return {"status": "ok"}
+
+@app.get("/api/logs")
+async def get_logs():
+    """Endpoint для получения логов"""
+    return {"logs": get_activity_logs()}
 
 @app.get("/")
 async def web_interface():

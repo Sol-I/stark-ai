@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Stark AI Agent - Main Entry Point
-Автоматически выбирает лучшую доступную модель AI
 """
 
 import asyncio
@@ -9,12 +8,16 @@ import threading
 import time
 import logging
 from server import run_server
-from agent_core import AIAgent
+from agent_core import AIAgent, add_activity_log
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('/root/stark/main.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -22,33 +25,30 @@ logger = logging.getLogger(__name__)
 def start_server():
     """Запуск FastAPI сервера в отдельном потоке"""
     try:
-        logger.info("Запуск FastAPI сервера...")
+        add_activity_log("INFO", "Запуск FastAPI сервера...")
+        logger.info("Starting FastAPI server...")
         run_server()
     except Exception as e:
-        logger.error(f"Ошибка сервера: {e}")
-
-
-async def background_model_checker(agent: AIAgent):
-    """Фоновая проверка доступности моделей"""
-    while True:
-        try:
-            await agent.background_model_checker()
-        except Exception as e:
-            logger.error(f"Ошибка в фоновой проверке: {e}")
-            await asyncio.sleep(60)
+        error_msg = f"Ошибка сервера: {e}"
+        add_activity_log("ERROR", error_msg)
+        logger.error(error_msg)
 
 
 async def main():
     """Основная функция запуска агента"""
-    print("🚀 Stark AI Agent запускается...")
+    add_activity_log("INFO", "Запуск Stark AI Agent")
+    logger.info("🚀 Stark AI Agent запускается...")
+
     print("=" * 50)
 
     # Показываем рейтинг моделей
     from config import MODEL_RANKING
-    print("📊 Рейтинг моделей (по параметрам):")
-    for i, model in enumerate(MODEL_RANKING[:5], 1):  # Показываем топ-5
+    logger.info("📊 Рейтинг моделей:")
+    for i, model in enumerate(MODEL_RANKING[:5], 1):
         status = "✅" if i == 1 else "🟡"
-        print(f"{status} {i}. {model['provider']} - {model['params']}B параметров")
+        model_info = f"{status} {i}. {model['provider']} - {model['params']}B параметров"
+        print(model_info)
+        logger.info(model_info)
 
     print("=" * 50)
 
@@ -59,19 +59,28 @@ async def main():
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
 
+    add_activity_log("INFO", "Ожидание запуска сервера...")
     logger.info("Ожидаем запуск сервера...")
     await asyncio.sleep(5)
 
     # Запускаем фоновую проверку моделей
-    bg_task = asyncio.create_task(background_model_checker(agent))
+    bg_task = asyncio.create_task(agent.background_model_checker())
 
     # Выводим информацию о запуске
-    print("✅ Сервер запущен!")
-    print("🌐 Веб-интерфейс: http://localhost:8000")
-    print("🌐 Внешний доступ: http://94.228.123.86:8000")
-    print("🤖 Telegram бот: активен")
-    print("🔄 Фоновая проверка моделей: запущена")
-    print("⏹️  Для остановки: Ctrl+C")
+    startup_info = [
+        "✅ Сервер запущен!",
+        "🌐 Веб-интерфейс: http://localhost:8000",
+        "🌐 Внешний доступ: http://94.228.123.86:8000",
+        "🤖 Telegram бот: активен",
+        "🔄 Фоновая проверка моделей: запущена",
+        "⏹️  Для остановки: Ctrl+C"
+    ]
+
+    for info in startup_info:
+        print(info)
+        logger.info(info)
+
+    add_activity_log("INFO", "Stark AI Agent успешно запущен")
     print("=" * 50)
 
     try:
@@ -80,16 +89,24 @@ async def main():
             await asyncio.sleep(60)
 
     except KeyboardInterrupt:
-        print("\n🛑 Остановка агента...")
+        add_activity_log("INFO", "Остановка агента по запросу пользователя")
+        logger.info("🛑 Остановка агента...")
         bg_task.cancel()
-        logger.info("Агент остановлен")
+
+    except Exception as e:
+        error_msg = f"Критическая ошибка в main: {e}"
+        add_activity_log("ERROR", error_msg)
+        logger.error(error_msg)
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+        add_activity_log("INFO", "Приложение завершено")
         print("\n👋 До свидания!")
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
+        error_msg = f"Критическая ошибка: {e}"
+        add_activity_log("ERROR", error_msg)
+        logger.error(error_msg)
         print(f"❌ Критическая ошибка: {e}")
