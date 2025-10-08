@@ -47,49 +47,66 @@ class AIAgent:
         )
         self.conversations = {}
         self.max_history = 3
-        self.model_ranking = MODEL_RANKING
-        self.current_model_index = 0
-        self.last_request_time = 0
-        self.request_delay = 8  # Задержка 8 секунд между запросами
 
         add_activity_log("INFO", "AI Agent инициализирован")
 
-    async def rate_limit_delay(self):
-        """Добавляет задержку между запросами для соблюдения лимитов"""
-        current_time = time.time()
-        time_since_last_request = current_time - self.last_request_time
+    async def handle_rate_limit(self, error_msg: str, user_id: str) -> str:
+        """Обрабатывает лимиты и возвращает сообщение или None если нужно продолжить"""
+        if "free-models-per-day" in error_msg:
+            # Дневной лимит исчерпан
+            add_activity_log("WARNING", "Дневной лимит OpenRouter исчерпан", user_id)
+            return "⚠️ **Дневной лимит OpenRouter исчерпан** (50 запросов/день). Лимит сбросится в 03:00 по МСК."
 
-        if time_since_last_request < self.request_delay:
-            sleep_time = self.request_delay - time_since_last_request
-            add_activity_log("DEBUG", f"Задержка {sleep_time:.2f} сек перед запросом")
-            await asyncio.sleep(sleep_time)
+        elif "free-models-per-min" in error_msg:
+            # Минутный лимит - извлекаем время сброса
+            try:
+                error_data = json.loads(error_msg.split(" - ")[-1])
+                reset_time = int(error_data['error']['metadata']['headers']['X-RateLimit-Reset'])
+                current_time = int(time.time() * 1000)
+                wait_seconds = max(1, (reset_time - current_time) // 1000)
 
-        self.last_request_time = time.time()
+                add_activity_log("INFO", f"Минутный лимит, ждем {wait_seconds} сек", user_id)
+                await asyncio.sleep(wait_seconds)
+                return None  # Продолжаем попытки
 
-    async def check_model_availability(self, model_name: str) -> bool:
-        """Проверяет доступность модели"""
+            except Exception as e:
+                add_activity_log("ERROR", f"Ошибка парсинга лимита: {e}", user_id)
+                await asyncio.sleep(60)  # Fallback - ждем минуту
+                return None
+
+        elif "Rate limit exceeded" in error_msg:
+            # Общий лимит - ждем 60 секунд
+            add_activity_log("WARNING", "Общий лимит OpenRouter, ждем 60 сек", user_id)
+            await asyncio.sleep(60)
+            return None
+
+        return None
+
+    async def try_model_request(self, model: dict, messages: list, user_id: str) -> tuple:
+        """Пытается сделать запрос к конкретной модели с обработкой ошибок"""
         try:
-            await self.rate_limit_delay()
+            add_activity_log("DEBUG", f"Попытка запроса к {model['name']}", user_id)
 
-            add_activity_log("DEBUG", f"Проверка доступности модели: {model_name}")
-
-            test_message = [{"role": "user", "content": "test"}]
             completion = self.client.chat.completions.create(
                 extra_headers={
                     "HTTP-Referer": "http://94.228.123.86:8000",
                     "X-Title": "Stark AI",
                 },
-                model=model_name,
-                messages=test_message,
-                max_tokens=10
+                model=model["name"],
+                messages=messages,
+                max_tokens=1024
             )
 
-            add_activity_log("INFO", f"Модель {model_name} доступна")
-            return True
+            ai_response = completion.choices[0].message.content
+            model_info = f"\n\n---\n*Отвечает {model['provider']} ({model['params']}B параметров)*"
+
+            add_activity_log("INFO", f"Успешный ответ от {model['provider']}", user_id)
+            return ai_response + model_info, True
 
         except Exception as e:
-            add_activity_log("WARNING", f"Модель {model_name} недоступна: {str(e)}")
-            return False
+            error_msg = str(e)
+            add_activity_log("ERROR", f"Ошибка {model['name']}: {error_msg}", user_id)
+            return error_msg, False
 
     async def process_message(self, user_id: str, message: str) -> str:
         add_activity_log("INFO", f"Получено сообщение: '{message}'", user_id)
@@ -101,104 +118,39 @@ class AIAgent:
         current_history = self.conversations[user_id][-self.max_history:]
         current_history.append({"role": "user", "content": message})
 
-        try:
-            await self.rate_limit_delay()
+        # Пробуем модели по порядку
+        for model_index, model in enumerate(MODEL_RANKING):
+            add_activity_log("DEBUG", f"Пробуем модель #{model_index + 1}: {model['name']}", user_id)
 
-            current_model = self.model_ranking[self.current_model_index]
-            add_activity_log("DEBUG", f"Используется модель: {current_model['name']}", user_id)
+            response, success = await self.try_model_request(model, current_history, user_id)
 
-            # Пробуем текущую модель
-            try:
-                add_activity_log("DEBUG", "Отправка запроса к API", user_id)
+            if success:
+                # Успешный ответ
+                current_history.append({"role": "assistant", "content": response})
+                self.conversations[user_id] = current_history[-self.max_history:]
+                add_activity_log("INFO", "Ответ сгенерирован успешно", user_id)
+                return response
 
-                completion = self.client.chat.completions.create(
-                    extra_headers={
-                        "HTTP-Referer": "http://94.228.123.86:8000",
-                        "X-Title": "Stark AI",
-                    },
-                    model=current_model["name"],
-                    messages=current_history,
-                    max_tokens=1024
-                )
+            else:
+                # Обработка ошибок
+                rate_limit_msg = await self.handle_rate_limit(response, user_id)
+                if rate_limit_msg:
+                    return rate_limit_msg  # Возвращаем сообщение о лимите
 
-                ai_response = completion.choices[0].message.content
-                model_info = f"\n\n---\n*Отвечает {current_model['provider']} ({current_model['params']}B параметров)*"
+                # Если это не лимит, продолжаем с следующей моделью
+                add_activity_log("INFO", f"Модель {model['name']} недоступна, пробуем следующую", user_id)
+                continue
 
-                add_activity_log("INFO", f"Успешный ответ от {current_model['provider']}", user_id)
-
-            except Exception as e:
-                error_msg = str(e)
-                add_activity_log("ERROR", f"Ошибка модели {current_model['name']}: {error_msg}", user_id)
-
-                if "429" in error_msg:
-                    return "⚠️ Слишком много запросов. Подожди 1 минуту и попробуй снова."
-
-                # Если текущая модель не работает, ищем лучшую доступную
-                add_activity_log("INFO", "Поиск альтернативной модели", user_id)
-                best_model_name = await self.find_best_available_model()
-                best_model = self.model_ranking[self.current_model_index]
-
-                completion = self.client.chat.completions.create(
-                    extra_headers={
-                        "HTTP-Referer": "http://94.228.123.86:8000",
-                        "X-Title": "Stark AI",
-                    },
-                    model=best_model_name,
-                    messages=current_history,
-                    max_tokens=1024
-                )
-
-                ai_response = completion.choices[0].message.content
-                model_info = f"\n\n---\n*Автоматически переключился на {best_model['provider']} ({best_model['params']}B)*"
-
-                add_activity_log("INFO", f"Переключился на модель: {best_model['name']}", user_id)
-
-            current_history.append({"role": "assistant", "content": ai_response})
-            self.conversations[user_id] = current_history[-self.max_history:]
-
-            add_activity_log("INFO", "Ответ сгенерирован успешно", user_id)
-            return ai_response + model_info
-
-        except Exception as e:
-            error_msg = f"Критическая ошибка: {str(e)}"
-            add_activity_log("ERROR", error_msg, user_id)
-            return f"Ошибка: {str(e)}"
-
-    async def find_best_available_model(self) -> str:
-        """Находит лучшую доступную модель"""
-        add_activity_log("INFO", "Поиск лучшей доступной модели")
-
-        for i, model in enumerate(self.model_ranking):
-            if await self.check_model_availability(model["name"]):
-                self.current_model_index = i
-                add_activity_log("INFO", f"Выбрана модель: {model['name']} ({model['params']}B)")
-                return model["name"]
-
-        # Если ничего не доступно, возвращаем последнюю работающую
-        fallback_model = self.model_ranking[-1]["name"]
-        add_activity_log("WARNING", f"Все модели недоступны, используем fallback: {fallback_model}")
-        return fallback_model
+        # Если все модели не сработали
+        error_msg = "❌ Все модели временно недоступны. Попробуйте позже."
+        add_activity_log("ERROR", "Все модели недоступны", user_id)
+        return error_msg
 
     async def background_model_checker(self):
-        """Фоновая проверка доступности лучших моделей"""
-        add_activity_log("INFO", "Запущена фоновая проверка моделей")
-
+        """Заглушка - фоновая проверка отключена"""
+        add_activity_log("INFO", "Фоновая проверка моделей отключена")
         while True:
-            try:
-                # Проверяем доступность моделей с высоким рейтингом
-                for i in range(3):  # Проверяем топ-3 модели
-                    if i != self.current_model_index and await self.check_model_availability(
-                            self.model_ranking[i]["name"]):
-                        if i < self.current_model_index:  # Если нашли модель лучше текущей
-                            self.current_model_index = i
-                            add_activity_log("INFO", f"Вернулся к лучшей модели: {self.model_ranking[i]['name']}")
-                            break
-
-                await asyncio.sleep(300)  # Проверяем каждые 5 минут
-
-            except Exception as e:
-                add_activity_log("ERROR", f"Ошибка в фоновой проверке: {str(e)}")
-                await asyncio.sleep(60)
+            await asyncio.sleep(3600)  # Просто спим
 
     def clear_history(self, user_id: str):
         if user_id in self.conversations:
