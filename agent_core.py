@@ -3,8 +3,9 @@ import logging
 import asyncio
 import time
 import json
+import httpx
 from datetime import datetime
-from config import OPENROUTER_API_KEY, MODEL_RANKING
+from config import OPENROUTER_API_KEY, HUGGINGFACE_API_KEY, MODEL_RANKING, API_ENDPOINTS
 
 # Настройка основного логирования
 logging.basicConfig(
@@ -56,28 +57,95 @@ def log_llm_metrics(metrics_data: dict):
 
 
 class AIAgent:
-    def __init__(self, api_key: str = OPENROUTER_API_KEY):
-        self.client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
+    def __init__(self):
+        self.openrouter_client = OpenAI(
+            base_url=API_ENDPOINTS["openrouter"],
+            api_key=OPENROUTER_API_KEY,
         )
+        self.huggingface_headers = {
+            "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
+            "Content-Type": "application/json"
+        }
         self.conversations = {}
         self.max_history = 3
         self.total_requests = 0
         self.total_input_tokens = 0
         self.total_output_tokens = 0
 
-        add_activity_log("INFO", "AI Agent инициализирован")
+        add_activity_log("INFO", "AI Agent инициализирован с поддержкой OpenRouter и HuggingFace")
+
+    async def make_openrouter_request(self, model: dict, messages: list) -> dict:
+        """Выполняет запрос к OpenRouter API"""
+        completion = self.openrouter_client.chat.completions.create(
+            extra_headers={
+                "HTTP-Referer": "http://94.228.123.86:8000",
+                "X-Title": "Stark AI",
+            },
+            model=model["name"],
+            messages=messages,
+            max_tokens=1024,
+            temperature=0.7
+        )
+
+        return {
+            "response": completion.choices[0].message.content,
+            "usage": completion.usage if hasattr(completion, 'usage') else None
+        }
+
+    async def make_huggingface_request(self, model: dict, messages: list) -> dict:
+        """Выполняет запрос к HuggingFace Inference API"""
+        # Форматируем сообщения для HuggingFace
+        formatted_messages = []
+        for msg in messages:
+            if msg["role"] == "user":
+                formatted_messages.append(f"<|user|>\n{msg['content']}")
+            elif msg["role"] == "assistant":
+                formatted_messages.append(f"<|assistant|>\n{msg['content']}")
+
+        prompt = "\n".join(formatted_messages) + "\n<|assistant|>\n"
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{API_ENDPOINTS['huggingface']}/models/{model['name']}",
+                headers=self.huggingface_headers,
+                json={
+                    "inputs": prompt,
+                    "parameters": {
+                        "max_new_tokens": 1024,
+                        "temperature": 0.7,
+                        "do_sample": True
+                    }
+                },
+                timeout=30.0
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                # Извлекаем текст ответа из разных форматов HuggingFace
+                if isinstance(result, list) and len(result) > 0:
+                    if 'generated_text' in result[0]:
+                        generated_text = result[0]['generated_text']
+                        # Вырезаем промпт из ответа
+                        ai_response = generated_text.replace(prompt, "").strip()
+                    else:
+                        ai_response = str(result[0])
+                else:
+                    ai_response = str(result)
+
+                return {
+                    "response": ai_response,
+                    "usage": None  # HuggingFace не возвращает usage
+                }
+            else:
+                raise Exception(f"HuggingFace API error: {response.status_code} - {response.text}")
 
     async def handle_rate_limit(self, error_msg: str, user_id: str) -> str:
         """Обрабатывает лимиты и возвращает сообщение или None если нужно продолжить"""
         if "free-models-per-day" in error_msg:
-            # Дневной лимит исчерпан
             add_activity_log("WARNING", "Дневной лимит OpenRouter исчерпан", user_id)
             return "⚠️ **Дневной лимит OpenRouter исчерпан** (50 запросов/день). Лимит сбросится в 03:00 по МСК."
 
         elif "free-models-per-min" in error_msg:
-            # Минутный лимит - извлекаем время сброса
             try:
                 error_data = json.loads(error_msg.split(" - ")[-1])
                 reset_time = int(error_data['error']['metadata']['headers']['X-RateLimit-Reset'])
@@ -86,16 +154,15 @@ class AIAgent:
 
                 add_activity_log("INFO", f"Минутный лимит, ждем {wait_seconds} сек", user_id)
                 await asyncio.sleep(wait_seconds)
-                return None  # Продолжаем попытки
+                return None
 
             except Exception as e:
                 add_activity_log("ERROR", f"Ошибка парсинга лимита: {e}", user_id)
-                await asyncio.sleep(60)  # Fallback - ждем минуту
+                await asyncio.sleep(60)
                 return None
 
-        elif "Rate limit exceeded" in error_msg:
-            # Общий лимит - ждем 60 секунд
-            add_activity_log("WARNING", "Общий лимит OpenRouter, ждем 60 сек", user_id)
+        elif "Rate limit exceeded" in error_msg or "429" in error_msg:
+            add_activity_log("WARNING", "Общий лимит, ждем 60 сек", user_id)
             await asyncio.sleep(60)
             return None
 
@@ -109,10 +176,10 @@ class AIAgent:
             'user_id': user_id,
             'model': model['name'],
             'provider': model['provider'],
+            'api_provider': model['api_provider'],
             'model_params': model['params'],
             'messages_count': len(messages),
             'last_user_message': messages[-1]['content'][:100] if messages and messages[-1].get('content') else '',
-            # Ограничиваем длину
             'status': 'success',
             'error_type': None,
             'response_time_ms': 0,
@@ -123,43 +190,36 @@ class AIAgent:
         }
 
         try:
-            add_activity_log("DEBUG", f"Попытка запроса к {model['name']}", user_id)
+            add_activity_log("DEBUG", f"Попытка запроса к {model['name']} ({model['api_provider']})", user_id)
 
-            completion = self.client.chat.completions.create(
-                extra_headers={
-                    "HTTP-Referer": "http://94.228.123.86:8000",
-                    "X-Title": "Stark AI",
-                },
-                model=model["name"],
-                messages=messages,
-                max_tokens=1024
-            )
+            if model['api_provider'] == 'openrouter':
+                result = await self.make_openrouter_request(model, messages)
+            elif model['api_provider'] == 'huggingface':
+                result = await self.make_huggingface_request(model, messages)
+            else:
+                raise ValueError(f"Unknown API provider: {model['api_provider']}")
 
-            # Извлекаем метрики из ответа
-            if hasattr(completion, 'usage'):
+            ai_response = result["response"]
+
+            # Обрабатываем usage метрики
+            if result["usage"]:
                 request_metrics.update({
-                    'input_tokens': completion.usage.prompt_tokens,
-                    'output_tokens': completion.usage.completion_tokens,
-                    'total_tokens': completion.usage.total_tokens
+                    'input_tokens': result["usage"].prompt_tokens,
+                    'output_tokens': result["usage"].completion_tokens,
+                    'total_tokens': result["usage"].total_tokens
                 })
 
-                # Обновляем общую статистику
                 self.total_requests += 1
-                self.total_input_tokens += completion.usage.prompt_tokens
-                self.total_output_tokens += completion.usage.completion_tokens
+                self.total_input_tokens += result["usage"].prompt_tokens
+                self.total_output_tokens += result["usage"].completion_tokens
 
-            ai_response = completion.choices[0].message.content
-            model_info = f"\n\n---\n*Отвечает {model['provider']} ({model['params']}B параметров)*"
+            model_info = f"\n\n---\n*Отвечает {model['provider']} ({model['params']}B параметров) через {model['api_provider'].upper()}*"
 
-            # Расчет времени ответа
             request_metrics['response_time_ms'] = int((time.time() - start_time) * 1000)
-
-            # Примерная оценка стоимости (для бесплатных моделей = 0)
             request_metrics['cost_estimate'] = 0.0
 
-            add_activity_log("INFO", f"Успешный ответ от {model['provider']}", user_id)
+            add_activity_log("INFO", f"Успешный ответ от {model['provider']} через {model['api_provider']}", user_id)
 
-            # Логируем успешный запрос
             log_llm_metrics(request_metrics)
 
             return ai_response + model_info, True
@@ -172,10 +232,9 @@ class AIAgent:
                 'response_time_ms': int((time.time() - start_time) * 1000)
             })
 
-            # Логируем неудачный запрос
             log_llm_metrics(request_metrics)
 
-            add_activity_log("ERROR", f"Ошибка {model['name']}: {error_msg}", user_id)
+            add_activity_log("ERROR", f"Ошибка {model['name']} ({model['api_provider']}): {error_msg}", user_id)
             return error_msg, False
 
     def _classify_error(self, error_msg: str) -> str:
@@ -205,30 +264,27 @@ class AIAgent:
         current_history = self.conversations[user_id][-self.max_history:]
         current_history.append({"role": "user", "content": message})
 
-        # Пробуем модели по порядку
+        # Пробуем модели по порядку (отсортированы по убыванию параметров)
         for model_index, model in enumerate(MODEL_RANKING):
-            add_activity_log("DEBUG", f"Пробуем модель #{model_index + 1}: {model['name']}", user_id)
+            add_activity_log("DEBUG", f"Пробуем модель #{model_index + 1}: {model['name']} ({model['api_provider']})",
+                             user_id)
 
             response, success = await self.try_model_request(model, current_history, user_id)
 
             if success:
-                # Успешный ответ
                 current_history.append({"role": "assistant", "content": response})
                 self.conversations[user_id] = current_history[-self.max_history:]
                 add_activity_log("INFO", "Ответ сгенерирован успешно", user_id)
                 return response
 
             else:
-                # Обработка ошибок
                 rate_limit_msg = await self.handle_rate_limit(response, user_id)
                 if rate_limit_msg:
-                    return rate_limit_msg  # Возвращаем сообщение о лимите
+                    return rate_limit_msg
 
-                # Если это не лимит, продолжаем с следующей моделью
                 add_activity_log("INFO", f"Модель {model['name']} недоступна, пробуем следующую", user_id)
                 continue
 
-        # Если все модели не сработали
         error_msg = "❌ Все модели временно недоступны. Попробуйте позже."
         add_activity_log("ERROR", "Все модели недоступны", user_id)
         return error_msg
@@ -249,28 +305,37 @@ class AIAgent:
         add_activity_log("INFO", "Фоновая проверка моделей запущена")
         while True:
             try:
-                # Проверяем доступность топ-3 моделей раз в час
-                for i in range(min(3, len(MODEL_RANKING))):
+                # Проверяем доступность топ-5 моделей раз в час
+                for i in range(min(5, len(MODEL_RANKING))):
                     model = MODEL_RANKING[i]
                     try:
                         test_message = [{"role": "user", "content": "test"}]
-                        await asyncio.wait_for(
-                            self.client.chat.completions.create(
-                                model=model["name"],
-                                messages=test_message,
-                                max_tokens=5
-                            ),
-                            timeout=10.0
-                        )
+                        if model['api_provider'] == 'openrouter':
+                            await asyncio.wait_for(
+                                self.openrouter_client.chat.completions.create(
+                                    model=model["name"],
+                                    messages=test_message,
+                                    max_tokens=5
+                                ),
+                                timeout=10.0
+                            )
+                        else:
+                            # Для HuggingFace просто проверяем доступность API
+                            async with httpx.AsyncClient() as client:
+                                await client.get(
+                                    f"{API_ENDPOINTS['huggingface']}/models/{model['name']}",
+                                    headers=self.huggingface_headers,
+                                    timeout=10.0
+                                )
                         add_activity_log("DEBUG", f"Модель {model['name']} доступна")
                     except Exception:
                         add_activity_log("DEBUG", f"Модель {model['name']} недоступна")
 
-                await asyncio.sleep(3600)  # Проверяем каждый час
+                await asyncio.sleep(3600)
 
             except Exception as e:
                 add_activity_log("ERROR", f"Ошибка в фоновой проверке: {e}")
-                await asyncio.sleep(300)  # Ждем 5 минут при ошибке
+                await asyncio.sleep(300)
 
     def clear_history(self, user_id: str):
         if user_id in self.conversations:
@@ -279,12 +344,10 @@ class AIAgent:
 
 
 def get_activity_logs():
-    """Возвращает логи для веб-интерфейса"""
     return activity_logs
 
 
 def get_llm_metrics_sample(n: int = 10):
-    """Возвращает последние N записей из лога метрик LLM"""
     try:
         with open('/root/stark/llm_metrics.log', 'r', encoding='utf-8') as f:
             lines = f.readlines()[-n:]
