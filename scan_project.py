@@ -360,10 +360,173 @@ def scan_api_documentation(root_dir='.'):
 
     return "\n".join(output)
 
+
+def get_specific_code(file_procedure_pairs, root_dir='.'):
+    """
+    API: Получение полного кода конкретных процедур или файлов
+    Вход: file_procedure_pairs - список кортежей [(filename, procedure_name), ...]
+    Выход: str (код процедур/файлов) + копирует в буфер обмена
+    Логика: Ищет указанные файлы и процедуры, возвращает их полный код
+    """
+    scanner = ProjectScanner(root_dir)
+    output = []
+
+    for file_spec in file_procedure_pairs:
+        if isinstance(file_spec, tuple):
+            filename, procedure_name = file_spec
+        else:
+            filename = file_spec
+            procedure_name = None
+
+        # Ищем файл
+        file_path = None
+        for potential_path in Path(root_dir).rglob('*'):
+            if potential_path.name == filename and not scanner.should_ignore(potential_path):
+                file_path = potential_path
+                break
+
+        if not file_path or not file_path.exists():
+            output.append(f"# Файл не найден: {filename}")
+            continue
+
+        try:
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+
+            if procedure_name:
+                # Ищем конкретную процедуру
+                procedure_code = extract_procedure_code(content, procedure_name, filename)
+                if procedure_code:
+                    output.append(f"# Файл: {filename}\n# Процедура: {procedure_name}\n{procedure_code}")
+                else:
+                    output.append(f"# Процедура '{procedure_name}' не найдена в файле {filename}")
+            else:
+                # Возвращаем весь файл
+                output.append(f"# Файл: {filename}\n{content}")
+
+        except Exception as e:
+            output.append(f"# Ошибка чтения {filename}: {e}")
+
+    result = "\n\n".join(output)
+
+    # Копируем в буфер обмена
+    if result.strip():
+        try:
+            import pyperclip
+            pyperclip.copy(result)
+            print(f"✅ Код скопирован в буфер обмена ({len(result)} символов)")
+        except ImportError:
+            print("❌ Pyperclip не установлен, буфер обмена недоступен")
+
+    return result
+
+
+def extract_procedure_code(content, procedure_name, filename):
+    """
+    Извлекает код конкретной процедуры из содержимого файла
+    """
+    lines = content.split('\n')
+    in_procedure = False
+    procedure_lines = []
+    indent_level = 0
+    procedure_start = None
+
+    # Паттерны для поиска процедуры
+    patterns = [
+        f"def {procedure_name}(",  # Обычная функция
+        f"async def {procedure_name}(",  # Асинхронная функция
+        f"class {procedure_name}",  # Класс
+        f"class {procedure_name}(",  # Класс с наследованием
+    ]
+
+    for i, line in enumerate(lines):
+        # Проверяем начало процедуры
+        if not in_procedure and any(line.strip().startswith(pattern) for pattern in patterns):
+            in_procedure = True
+            procedure_start = i
+            # Определяем базовый отступ
+            indent_level = len(line) - len(line.lstrip())
+            procedure_lines.append(line)
+            continue
+
+        if in_procedure:
+            # Проверяем конец процедуры (меньший отступ или конец файла)
+            current_indent = len(line) - len(line.lstrip()) if line.strip() else indent_level + 1
+
+            if current_indent <= indent_level and line.strip() and i > procedure_start:
+                # Это начало следующей процедуры или конец
+                break
+
+            procedure_lines.append(line)
+
+    return '\n'.join(procedure_lines) if procedure_lines else ""
+
+
+def create_llm_prompt(project_context):
+    """
+    Создает промпт для LLM с инструкциями по запросу дополнительного кода
+    """
+    prompt = f"""
+{project_context}
+
+=== ИНСТРУКЦИЯ ДЛЯ LLM ===
+
+Если тебе нужен код конкретной процедуры или файла для более точного ответа, 
+попроси пользователя выполнить в терминале PyCharm:
+
+python scan_project.py --code "filename.py" "procedure_name"
+
+Примеры:
+- Получить весь файл: python scan_project.py --code "agent_core.py"
+- Получить конкретную процедуру: python scan_project.py --code "agent_core.py" "process_message"
+- Получить несколько процедур: python scan_project.py --code "agent_core.py" "process_message" --code "server.py" "chat_endpoint"
+
+После выполнения команды код будет скопирован в буфер обмена и пользователь сможет 
+вставить его в следующий запрос.
+
+Продолжи работу с доступной информацией. Если конкретный код не требуется, 
+не упоминай эту инструкцию.
+"""
+    return prompt
+
+
+def main():
+    """Запуск из PyCharm или командной строки"""
+    parser = argparse.ArgumentParser(description='Сканирование структуры проекта')
+    parser.add_argument('--root', '-r', default='.', help='Корневая директория проекта')
+    parser.add_argument('--type', '-t', type=int, choices=[0, 1, 2, 3], default=0,
+                        help='Тип вывода: 0-Markdown, 1-Структура для LLM, 2-Полный контекст для LLM, 3-API документация')
+    parser.add_argument('--output', '-o', help='Файл для сохранения результата')
+
+    # Простой вариант для получения кода - принимает ровно 2 аргумента
+    parser.add_argument('--code', nargs=2, metavar=('FILE', 'PROCEDURE'),
+                        help='Получить код процедуры: --code filename.py procedure_name')
+
+    args = parser.parse_args()
+
+    # Режим получения конкретного кода
+    if args.code:
+        filename, procedure_name = args.code
+        print(f"🔍 Поиск кода: {filename} -> {procedure_name}")
+        result = get_specific_code([(filename, procedure_name)], args.root)
+        print(result)
+        return
+
+    # Обычные режимы сканирования
+    scanner = ProjectScanner(args.root)
+    result = scanner.scan_project(args.type)
+
+    # Добавляем промпт для LLM в конец (кроме режима 0)
+    if args.type != 0:
+        result = create_llm_prompt(result)
+
+    if args.output:
+        with open(args.output, 'w', encoding='utf-8') as f:
+            f.write(result)
+        print(f"Результат сохранен в: {args.output}")
+    else:
+        print(result)
+
+
 if __name__ == "__main__":
-    print(scan_project_structure('.', 0))
-    # project_structure = scan_project_structure('.', 1)
-    # full_context = scan_project_structure('.', 2)
-    api_context = scan_api_documentation()
-    pyperclip.copy(api_context)
+    main()
 

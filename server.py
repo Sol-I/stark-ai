@@ -38,7 +38,8 @@ async def startup_event():
     Выход: None
     Логика: Запускает фоновую проверку моделей при старте сервера
     """
-    asyncio.create_task(agent.background_model_checker())
+    # закоментировано т.к. тратит токены
+    # asyncio.create_task(agent.background_model_checker())
     add_activity_log("INFO", "Сервер запущен")
 
 @app.post("/api/chat")

@@ -12,7 +12,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/root/stark/agent.log', encoding='utf-8'),
+        logging.FileHandler('agent.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 llm_metrics_logger = logging.getLogger('llm_metrics')
 llm_metrics_logger.setLevel(logging.INFO)
-llm_metrics_handler = logging.FileHandler('/root/stark/llm_metrics.log', encoding='utf-8')
+llm_metrics_handler = logging.FileHandler('llm_metrics.log', encoding='utf-8')
 llm_metrics_handler.setFormatter(logging.Formatter('%(message)s'))
 llm_metrics_logger.addHandler(llm_metrics_handler)
 llm_metrics_logger.propagate = False
@@ -412,7 +412,7 @@ def get_llm_metrics_sample(n: int = 10):
     Выход: list (список метрик в формате JSON)
     """
     try:
-        with open('/root/stark/llm_metrics.log', 'r', encoding='utf-8') as f:
+        with open('llm_metrics.log', 'r', encoding='utf-8') as f:
             lines = f.readlines()[-n:]
             return [json.loads(line.strip()) for line in lines if line.strip()]
     except Exception as e:
