@@ -1,13 +1,13 @@
-from openai import OpenAI
+import os
 import logging
-import asyncio
-import time
 import json
+import time
+import asyncio
 import httpx
 from datetime import datetime
-from config import OPENROUTER_API_KEY, HUGGINGFACE_API_KEY, MODEL_RANKING, API_ENDPOINTS
+from openai import OpenAI
+from config import OPENROUTER_API_KEY, HUGGINGFACE_API_KEY, API_ENDPOINTS, MODEL_RANKING
 
-# Настройка основного логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -18,7 +18,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Настройка отдельного логгера для LLM метрик
 llm_metrics_logger = logging.getLogger('llm_metrics')
 llm_metrics_logger.setLevel(logging.INFO)
 llm_metrics_handler = logging.FileHandler('/root/stark/llm_metrics.log', encoding='utf-8')
@@ -26,13 +25,16 @@ llm_metrics_handler.setFormatter(logging.Formatter('%(message)s'))
 llm_metrics_logger.addHandler(llm_metrics_handler)
 llm_metrics_logger.propagate = False
 
-# Глобальный список для хранения логов (для веб-интерфейса)
 activity_logs = []
 MAX_LOG_ENTRIES = 1000
 
-
 def add_activity_log(level: str, message: str, user_id: str = "system"):
-    """Добавляет запись в лог активности"""
+    """
+    API: Добавление записи в лог активности системы
+    Вход: level (уровень), message (сообщение), user_id (идентификатор пользователя)
+    Выход: None (запись добавляется в глобальный лог)
+    Логика: Сохраняет до MAX_LOG_ENTRIES записей, автоматически удаляет старые
+    """
     log_entry = {
         'timestamp': datetime.now().strftime('%H:%M:%S'),
         'level': level,
@@ -41,23 +43,36 @@ def add_activity_log(level: str, message: str, user_id: str = "system"):
     }
     activity_logs.append(log_entry)
 
-    # Ограничиваем размер лога
     if len(activity_logs) > MAX_LOG_ENTRIES:
         activity_logs.pop(0)
 
     logger.info(f"[{user_id}] {message}")
 
-
 def log_llm_metrics(metrics_data: dict):
-    """Логирует метрики LLM запросов в отдельный файл"""
+    """
+    API: Логирование метрик LLM запросов
+    Вход: metrics_data (словарь с метриками запроса)
+    Выход: None (данные записываются в отдельный лог-файл)
+    Логика: JSON-логирование в llm_metrics.log для анализа производительности
+    """
     try:
         llm_metrics_logger.info(json.dumps(metrics_data, ensure_ascii=False))
     except Exception as e:
         logger.error(f"Ошибка логирования метрик LLM: {e}")
 
-
 class AIAgent:
+    """
+    AI Agent - ядро интеллектуального ассистента
+    API: Обработка сообщений пользователя через каскад LLM моделей
+    Основные возможности: автоматический выбор модели, обработка лимитов, логирование
+    """
     def __init__(self):
+        """
+        API: Инициализация AI Agent
+        Вход: None (использует конфигурацию из config.py)
+        Выход: None (создает экземпляр агента)
+        Логика: Настраивает клиенты API, инициализирует хранилище конверсаций
+        """
         self.openrouter_client = OpenAI(
             base_url=API_ENDPOINTS["openrouter"],
             api_key=OPENROUTER_API_KEY,
@@ -75,7 +90,12 @@ class AIAgent:
         add_activity_log("INFO", "AI Agent инициализирован с поддержкой OpenRouter и HuggingFace")
 
     async def make_openrouter_request(self, model: dict, messages: list) -> dict:
-        """Выполняет запрос к OpenRouter API"""
+        """
+        API: Запрос к OpenRouter API
+        Вход: model (конфиг модели), messages (история диалога в формате OpenAI)
+        Выход: dict {response: str, usage: объект использования токенов}
+        Логика: Создает chat completion с указанной моделью и параметрами
+        """
         completion = self.openrouter_client.chat.completions.create(
             extra_headers={
                 "HTTP-Referer": "http://94.228.123.86:8000",
@@ -93,8 +113,12 @@ class AIAgent:
         }
 
     async def make_huggingface_request(self, model: dict, messages: list) -> dict:
-        """Выполняет запрос к HuggingFace Inference API"""
-        # Форматируем сообщения для HuggingFace
+        """
+        API: Запрос к HuggingFace Inference API
+        Вход: model (конфиг модели), messages (история диалога)
+        Выход: dict {response: str, usage: None}
+        Логика: Форматирует промпт для HF моделей, обрабатывает различные форматы ответов
+        """
         formatted_messages = []
         for msg in messages:
             if msg["role"] == "user":
@@ -121,11 +145,9 @@ class AIAgent:
 
             if response.status_code == 200:
                 result = response.json()
-                # Извлекаем текст ответа из разных форматов HuggingFace
                 if isinstance(result, list) and len(result) > 0:
                     if 'generated_text' in result[0]:
                         generated_text = result[0]['generated_text']
-                        # Вырезаем промпт из ответа
                         ai_response = generated_text.replace(prompt, "").strip()
                     else:
                         ai_response = str(result[0])
@@ -134,13 +156,18 @@ class AIAgent:
 
                 return {
                     "response": ai_response,
-                    "usage": None  # HuggingFace не возвращает usage
+                    "usage": None
                 }
             else:
                 raise Exception(f"HuggingFace API error: {response.status_code} - {response.text}")
 
     async def handle_rate_limit(self, error_msg: str, user_id: str) -> str:
-        """Обрабатывает лимиты и возвращает сообщение или None если нужно продолжить"""
+        """
+        API: Обработка лимитов запросов API
+        Вход: error_msg (текст ошибки), user_id (идентификатор пользователя)
+        Выход: str или None (сообщение пользователю или None для повторной попытки)
+        Логика: Анализирует тип лимита, возвращает сообщение или делает паузу
+        """
         if "free-models-per-day" in error_msg:
             add_activity_log("WARNING", "Дневной лимит OpenRouter исчерпан", user_id)
             return "⚠️ **Дневной лимит OpenRouter исчерпан** (50 запросов/день). Лимит сбросится в 03:00 по МСК."
@@ -169,7 +196,12 @@ class AIAgent:
         return None
 
     async def try_model_request(self, model: dict, messages: list, user_id: str) -> tuple:
-        """Пытается сделать запрос к конкретной модели с обработкой ошибок и логированием метрик"""
+        """
+        API: Попытка запроса к конкретной LLM модели
+        Вход: model (конфиг модели), messages (история диалога), user_id
+        Выход: tuple (ответ: str, успех: bool)
+        Логика: Выбор провайдера API, логирование метрик, обработка ошибок
+        """
         start_time = time.time()
         request_metrics = {
             'timestamp': datetime.now().isoformat(),
@@ -201,7 +233,6 @@ class AIAgent:
 
             ai_response = result["response"]
 
-            # Обрабатываем usage метрики
             if result["usage"]:
                 request_metrics.update({
                     'input_tokens': result["usage"].prompt_tokens,
@@ -238,7 +269,12 @@ class AIAgent:
             return error_msg, False
 
     def _classify_error(self, error_msg: str) -> str:
-        """Классифицирует тип ошибки"""
+        """
+        API: Классификация ошибок API
+        Вход: error_msg (текст ошибки)
+        Выход: str (тип ошибки)
+        Логика: Анализирует текст ошибки для определения категории проблемы
+        """
         if "429" in error_msg and "free-models-per-day" in error_msg:
             return "daily_rate_limit"
         elif "429" in error_msg and "free-models-per-min" in error_msg:
@@ -255,6 +291,12 @@ class AIAgent:
             return "unknown_error"
 
     async def process_message(self, user_id: str, message: str) -> str:
+        """
+        API: Основной метод обработки сообщений пользователя
+        Вход: user_id (идентификатор сессии), message (текст сообщения)
+        Выход: str (ответ ИИ)
+        Логика: Последовательно пробует модели из MODEL_RANKING, сохраняет историю диалога
+        """
         add_activity_log("INFO", f"Получено сообщение: '{message}'", user_id)
 
         if user_id not in self.conversations:
@@ -264,7 +306,6 @@ class AIAgent:
         current_history = self.conversations[user_id][-self.max_history:]
         current_history.append({"role": "user", "content": message})
 
-        # Пробуем модели по порядку (отсортированы по убыванию параметров)
         for model_index, model in enumerate(MODEL_RANKING):
             add_activity_log("DEBUG", f"Пробуем модель #{model_index + 1}: {model['name']} ({model['api_provider']})",
                              user_id)
@@ -290,7 +331,12 @@ class AIAgent:
         return error_msg
 
     def get_usage_statistics(self) -> dict:
-        """Возвращает статистику использования"""
+        """
+        API: Получение статистики использования
+        Вход: None
+        Выход: dict (статистика запросов и токенов)
+        Логика: Агрегирует данные по всем выполненным запросам
+        """
         return {
             'total_requests': self.total_requests,
             'total_input_tokens': self.total_input_tokens,
@@ -301,11 +347,15 @@ class AIAgent:
         }
 
     async def background_model_checker(self):
-        """Фоновая проверка доступности моделей"""
+        """
+        API: Фоновая проверка доступности моделей
+        Вход: None
+        Выход: None (бесконечный цикл)
+        Логика: Периодически проверяет доступность топ-5 моделей раз в час
+        """
         add_activity_log("INFO", "Фоновая проверка моделей запущена")
         while True:
             try:
-                # Проверяем доступность топ-5 моделей раз в час
                 for i in range(min(5, len(MODEL_RANKING))):
                     model = MODEL_RANKING[i]
                     try:
@@ -320,7 +370,6 @@ class AIAgent:
                                 timeout=10.0
                             )
                         else:
-                            # Для HuggingFace просто проверяем доступность API
                             async with httpx.AsyncClient() as client:
                                 await client.get(
                                     f"{API_ENDPOINTS['huggingface']}/models/{model['name']}",
@@ -338,16 +387,30 @@ class AIAgent:
                 await asyncio.sleep(300)
 
     def clear_history(self, user_id: str):
+        """
+        API: Очистка истории диалога пользователя
+        Вход: user_id (идентификатор пользователя)
+        Выход: None
+        Логика: Удаляет историю сообщений для указанного пользователя
+        """
         if user_id in self.conversations:
             del self.conversations[user_id]
             add_activity_log("INFO", "История диалога очищена", user_id)
 
-
 def get_activity_logs():
+    """
+    API: Получение логов активности системы
+    Вход: None
+    Выход: list (список записей лога)
+    """
     return activity_logs
 
-
 def get_llm_metrics_sample(n: int = 10):
+    """
+    API: Получение выборки метрик LLM запросов
+    Вход: n (количество последних записей)
+    Выход: list (список метрик в формате JSON)
+    """
     try:
         with open('/root/stark/llm_metrics.log', 'r', encoding='utf-8') as f:
             lines = f.readlines()[-n:]
