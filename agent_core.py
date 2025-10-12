@@ -1,420 +1,658 @@
-import os
-import logging
-import json
-import time
-import asyncio
-import httpx
-from datetime import datetime
-from openai import OpenAI
-from config import OPENROUTER_API_KEY, HUGGINGFACE_API_KEY, API_ENDPOINTS, MODEL_RANKING
+"""
+AI Agent Core - ядро системы искусственного интеллекта
+API: Универсальный обработчик запросов к LLM провайдерам с мониторингом лимитов
+Основные возможности: ротация моделей, трекинг использования, обработка ошибок, логирование в БД
+"""
 
+import logging
+import asyncio
+import time
+import json
+import aiohttp
+from typing import Dict, List, Tuple, Optional, Any
+
+# Конфигурация системы
+from config import (
+    OPENROUTER_API_KEY,
+    HUGGINGFACE_API_KEY,
+    OPENAI_API_KEY,
+    ANTHROPIC_API_KEY,
+    GOOGLE_API_KEY,
+    MODEL_RANKING,
+    MAX_HISTORY_LENGTH,
+    REQUEST_TIMEOUT
+)
+
+# Импорт системы логирования
+from database import add_activity_log, create_llm_request
+
+# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('agent.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-llm_metrics_logger = logging.getLogger('llm_metrics')
-llm_metrics_logger.setLevel(logging.INFO)
-llm_metrics_handler = logging.FileHandler('llm_metrics.log', encoding='utf-8')
-llm_metrics_handler.setFormatter(logging.Formatter('%(message)s'))
-llm_metrics_logger.addHandler(llm_metrics_handler)
-llm_metrics_logger.propagate = False
-
-activity_logs = []
-MAX_LOG_ENTRIES = 1000
-
-def add_activity_log(level: str, message: str, user_id: str = "system"):
-    """
-    API: Добавление записи в лог активности системы
-    Вход: level (уровень), message (сообщение), user_id (идентификатор пользователя)
-    Выход: None (запись добавляется в глобальный лог)
-    Логика: Сохраняет до MAX_LOG_ENTRIES записей, автоматически удаляет старые
-    """
-    log_entry = {
-        'timestamp': datetime.now().strftime('%H:%M:%S'),
-        'level': level,
-        'user_id': user_id,
-        'message': message
-    }
-    activity_logs.append(log_entry)
-
-    if len(activity_logs) > MAX_LOG_ENTRIES:
-        activity_logs.pop(0)
-
-    logger.info(f"[{user_id}] {message}")
-
-def log_llm_metrics(metrics_data: dict):
-    """
-    API: Логирование метрик LLM запросов
-    Вход: metrics_data (словарь с метриками запроса)
-    Выход: None (данные записываются в отдельный лог-файл)
-    Логика: JSON-логирование в llm_metrics.log для анализа производительности
-    """
-    try:
-        llm_metrics_logger.info(json.dumps(metrics_data, ensure_ascii=False))
-    except Exception as e:
-        logger.error(f"Ошибка логирования метрик LLM: {e}")
 
 class AIAgent:
     """
-    AI Agent - ядро интеллектуального ассистента
-    API: Обработка сообщений пользователя через каскад LLM моделей
-    Основные возможности: автоматический выбор модели, обработка лимитов, логирование
+    AI Agent - основной класс обработки запросов к LLM провайдерам
+    API: Управление диалогами, ротация моделей, мониторинг лимитов, логирование операций
+    Основные возможности: отказоустойчивость, многомодельность, трекинг использования, аналитика
     """
+
     def __init__(self):
         """
         API: Инициализация AI Agent
-        Вход: None (использует конфигурацию из config.py)
+        Вход: None
         Выход: None (создает экземпляр агента)
-        Логика: Настраивает клиенты API, инициализирует хранилище конверсаций
+        Логика: Инициализация кэшей, истории диалогов, метрик использования
         """
-        self.openrouter_client = OpenAI(
-            base_url=API_ENDPOINTS["openrouter"],
-            api_key=OPENROUTER_API_KEY,
-        )
-        self.huggingface_headers = {
-            "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        self.conversations = {}
-        self.max_history = 3
-        self.total_requests = 0
-        self.total_input_tokens = 0
-        self.total_output_tokens = 0
+        self.conversations: Dict[str, List[Dict]] = {}
+        self.max_history = MAX_HISTORY_LENGTH or 10
+        self.request_timeout = REQUEST_TIMEOUT or 30
+        self.last_request_time = 0
+        self.min_request_interval = 0.1
 
-        add_activity_log("INFO", "AI Agent инициализирован с поддержкой OpenRouter и HuggingFace")
+        add_activity_log("INFO", "AI Agent инициализирован с системой мониторинга лимитов", "system")
+        logger.info("AI Agent initialized with %d models", len(MODEL_RANKING))
 
-    async def make_openrouter_request(self, model: dict, messages: list) -> dict:
+    async def process_message(self, user_id: str, message: str, endpoint: str = "unknown",
+                              process_type: str = "chat",
+                              process_details: str = None) -> str:
         """
-        API: Запрос к OpenRouter API
-        Вход: model (конфиг модели), messages (история диалога в формате OpenAI)
-        Выход: dict {response: str, usage: объект использования токенов}
-        Логика: Создает chat completion с указанной моделью и параметрами
+        API: Основной метод обработки сообщений пользователя
+        Вход: user_id (идентификатор сессии), message (текст сообщения), endpoint (источник запроса), process_type (тип процесса), process_details (детали)
+        Выход: str (ответ ИИ или сообщение об ошибке)
+        Логика: Последовательно пробует модели из MODEL_RANKING, логирует все операции в БД
         """
-        completion = self.openrouter_client.chat.completions.create(
-            extra_headers={
-                "HTTP-Referer": "http://94.228.123.86:8000",
-                "X-Title": "Stark AI",
-            },
-            model=model["name"],
-            messages=messages,
-            max_tokens=1024,
-            temperature=0.7
-        )
+        try:
+            add_activity_log("INFO", f"Получено сообщение через {endpoint}: '{message[:100]}...'", user_id)
 
-        return {
-            "response": completion.choices[0].message.content,
-            "usage": completion.usage if hasattr(completion, 'usage') else None
-        }
+            # Защита от слишком частых запросов
+            await self._rate_limit_protection()
 
-    async def make_huggingface_request(self, model: dict, messages: list) -> dict:
+            # Инициализация сессии пользователя
+            if user_id not in self.conversations:
+                self.conversations[user_id] = []
+                add_activity_log("DEBUG", f"Создана новая сессия пользователя", user_id)
+
+            # Обновление истории диалога
+            current_history = self.conversations[user_id][-self.max_history:]
+            current_history.append({"role": "user", "content": message})
+
+            # Последовательная попытка моделей по приоритету
+            for model_index, model in enumerate(MODEL_RANKING):
+                model_info = f"{model['name']} ({model['api_provider']})"
+                add_activity_log("DEBUG", f"Попытка #{model_index + 1}: {model_info}", user_id)
+
+                response, success = await self._try_model_request(model, current_history, user_id, endpoint,
+                                                                  process_type, process_details)
+
+                if success:
+                    # Успешный ответ - сохраняем историю и возвращаем результат
+                    current_history.append({"role": "assistant", "content": response})
+                    self.conversations[user_id] = current_history[-self.max_history:]
+                    add_activity_log("INFO", f"Успешный ответ от {model_info}", user_id)
+                    return response
+                else:
+                    # Обработка ограничений лимитов
+                    limit_msg = await self._handle_api_limits(response, user_id)
+                    if limit_msg:
+                        return limit_msg
+
+                    add_activity_log("INFO", f"Модель {model_info} недоступна", user_id)
+                    continue
+
+            # Все модели недоступны
+            error_msg = "❌ Все модели временно недоступны. Попробуйте позже."
+            add_activity_log("ERROR", "Все модели в ротации недоступны", user_id)
+            return error_msg
+
+        except Exception as e:
+            error_msg = f"❌ Системная ошибка обработки сообщения: {str(e)}"
+            add_activity_log("ERROR", f"Критическая ошибка process_message: {e}", user_id)
+            return error_msg
+
+    async def _try_model_request(self, model: Dict[str, Any], history: List[Dict],
+                                 user_id: str, endpoint: str) -> Tuple[str, bool]:
         """
-        API: Запрос к HuggingFace Inference API
-        Вход: model (конфиг модели), messages (история диалога)
-        Выход: dict {response: str, usage: None}
-        Логика: Форматирует промпт для HF моделей, обрабатывает различные форматы ответов
+        API: Попытка запроса к конкретной модели с полным логированием
+        Вход: model (конфиг модели), history (история диалога), user_id (идентификатор), endpoint (источник)
+        Выход: tuple (response, success) - ответ и статус успеха
+        Логика: Выполняет запрос к API с трекингом токенов, времени и ошибок
         """
-        formatted_messages = []
-        for msg in messages:
-            if msg["role"] == "user":
-                formatted_messages.append(f"<|user|>\n{msg['content']}")
-            elif msg["role"] == "assistant":
-                formatted_messages.append(f"<|assistant|>\n{msg['content']}")
+        start_time = time.time()
+        prompt = self._build_prompt(history)
 
-        prompt = "\n".join(formatted_messages) + "\n<|assistant|>\n"
+        try:
+            add_activity_log("DEBUG", f"Запрос к {model['name']}", user_id)
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{API_ENDPOINTS['huggingface']}/models/{model['name']}",
-                headers=self.huggingface_headers,
-                json={
-                    "inputs": prompt,
-                    "parameters": {
-                        "max_new_tokens": 1024,
-                        "temperature": 0.7,
-                        "do_sample": True
-                    }
-                },
-                timeout=30.0
+            # Универсальный вызов API
+            response = await self._call_universal_api(model, prompt, user_id)
+
+            # Обработка успешного ответа
+            if response and response.strip():
+                duration_ms = int((time.time() - start_time) * 1000)
+                prompt_tokens = self._estimate_tokens(prompt)
+                completion_tokens = self._estimate_tokens(response)
+
+                # Логирование успешного запроса в БД
+                await self._log_llm_request(
+                    user_id=user_id,
+                    provider=model['api_provider'],
+                    model=model['name'],
+                    endpoint=endpoint,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    success=True,
+                    duration_ms=duration_ms,
+                    estimated_limits=80
+                )
+
+                add_activity_log("INFO", f"Успешный ответ ({len(response)} символов)", user_id)
+                return response, True
+            else:
+                # Пустой ответ
+                add_activity_log("WARNING", f"Пустой ответ от модели", user_id)
+                return "Пустой ответ от модели", False
+
+        except aiohttp.ClientError as e:
+            # Ошибки сети и соединения
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_type = "network_error"
+            await self._log_llm_request(
+                user_id=user_id,
+                provider=model['api_provider'],
+                model=model['name'],
+                endpoint=endpoint,
+                prompt_tokens=self._estimate_tokens(prompt),
+                success=False,
+                error_type=error_type,
+                error_message=f"Network error: {str(e)}",
+                duration_ms=duration_ms,
+                estimated_limits=50
+            )
+            return f"Сетевая ошибка: {str(e)}", False
+
+        except asyncio.TimeoutError as e:
+            # Таймаут запроса
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_type = "timeout"
+            await self._log_llm_request(
+                user_id=user_id,
+                provider=model['api_provider'],
+                model=model['name'],
+                endpoint=endpoint,
+                prompt_tokens=self._estimate_tokens(prompt),
+                success=False,
+                error_type=error_type,
+                error_message="Request timeout",
+                duration_ms=duration_ms,
+                estimated_limits=60
+            )
+            return "Таймаут запроса к API", False
+
+        except Exception as e:
+            # Все остальные ошибки
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_type = self._extract_error_type(e)
+            estimated_limits = self._estimate_limits_remaining(e)
+
+            await self._log_llm_request(
+                user_id=user_id,
+                provider=model['api_provider'],
+                model=model['name'],
+                endpoint=endpoint,
+                prompt_tokens=self._estimate_tokens(prompt),
+                success=False,
+                error_type=error_type,
+                error_message=f"API error: {str(e)}",
+                duration_ms=duration_ms,
+                estimated_limits=estimated_limits
             )
 
-            if response.status_code == 200:
-                result = response.json()
-                if isinstance(result, list) and len(result) > 0:
-                    if 'generated_text' in result[0]:
-                        generated_text = result[0]['generated_text']
-                        ai_response = generated_text.replace(prompt, "").strip()
-                    else:
-                        ai_response = str(result[0])
+            return f"Ошибка API: {str(e)}", False
+
+    async def _call_universal_api(self, model: Dict[str, Any], prompt: str, user_id: str) -> str:
+        """
+        API: Универсальный вызов ко всем LLM провайдерам через единый интерфейс
+        Вход: model (конфиг модели), prompt (промпт), user_id (идентификатор)
+        Выход: str (ответ модели)
+        Логика: Определяет стратегию провайдера, строит запрос, парсит ответ
+        """
+        provider = model['api_provider']
+        strategy = self._get_provider_strategy(provider)
+
+        if not strategy:
+            raise ValueError(f"Неизвестный провайдер: {provider}")
+
+        # Построение запроса
+        url, headers, data = self._build_api_request(strategy, model, prompt)
+
+        # Выполнение HTTP запроса
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=data, timeout=self.request_timeout) as response:
+                response_text = await response.text()
+
+                if response.status == 200:
+                    # Успешный ответ - парсим
+                    return self._parse_api_response(provider, response_text)
                 else:
-                    ai_response = str(result)
+                    # Ошибка - классифицируем и выбрасываем исключение
+                    raise self._handle_api_error(provider, response.status, response_text)
 
-                return {
-                    "response": ai_response,
-                    "usage": None
-                }
+    def _get_provider_strategy(self, provider: str) -> Dict[str, Any]:
+        """
+        API: Получение конфигурации для конкретного провайдера
+        Вход: provider (идентификатор провайдера)
+        Выход: Dict (стратегия провайдера) или None если неизвестен
+        Логика: Возвращает настройки endpoints, headers, форматы для каждого провайдера
+        """
+        strategies = {
+            'openrouter': {
+                'url': 'https://openrouter.ai/api/v1/chat/completions',
+                'headers': {
+                    'Authorization': f'Bearer {OPENROUTER_API_KEY}',
+                    'Content-Type': 'application/json',
+                    'HTTP-Referer': 'https://stark-ai.com',
+                    'X-Title': 'Stark AI Assistant'
+                },
+                'body_template': {
+                    'model': '{model_name}',
+                    'messages': [{'role': 'user', 'content': '{prompt}'}],
+                    'max_tokens': 1000,
+                    'temperature': 0.7
+                },
+                'response_parser': 'openai_format'
+            },
+            'huggingface': {
+                'url': 'https://api-inference.huggingface.co/models/{model_name}',
+                'headers': {
+                    'Authorization': f'Bearer {HUGGINGFACE_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                'body_template': {
+                    'inputs': '{prompt}',
+                    'parameters': {
+                        'max_new_tokens': 1000,
+                        'temperature': 0.7,
+                        'return_full_text': False
+                    }
+                },
+                'response_parser': 'huggingface_format'
+            },
+            'openai': {
+                'url': 'https://api.openai.com/v1/chat/completions',
+                'headers': {
+                    'Authorization': f'Bearer {OPENAI_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                'body_template': {
+                    'model': '{model_name}',
+                    'messages': [{'role': 'user', 'content': '{prompt}'}],
+                    'max_tokens': 1000,
+                    'temperature': 0.7
+                },
+                'response_parser': 'openai_format'
+            },
+            'anthropic': {
+                'url': 'https://api.anthropic.com/v1/messages',
+                'headers': {
+                    'x-api-key': ANTHROPIC_API_KEY,
+                    'Content-Type': 'application/json',
+                    'anthropic-version': '2023-06-01'
+                },
+                'body_template': {
+                    'model': '{model_name}',
+                    'max_tokens': 1000,
+                    'temperature': 0.7,
+                    'messages': [{'role': 'user', 'content': '{prompt}'}]
+                },
+                'response_parser': 'anthropic_format'
+            },
+            'google': {
+                'url': 'https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent',
+                'headers': {
+                    'Content-Type': 'application/json'
+                },
+                'body_template': {
+                    'contents': [{
+                        'parts': [{'text': '{prompt}'}]
+                    }],
+                    'generationConfig': {
+                        'maxOutputTokens': 1000,
+                        'temperature': 0.7
+                    }
+                },
+                'response_parser': 'google_format',
+                'params': {'key': GOOGLE_API_KEY}
+            }
+        }
+
+        return strategies.get(provider)
+
+    def _build_api_request(self, strategy: Dict[str, Any], model: Dict[str, Any], prompt: str) -> Tuple[
+        str, Dict, Dict]:
+        """
+        API: Построение HTTP запроса для выбранного провайдера
+        Вход: strategy (стратегия провайдера), model (конфиг модели), prompt (промпт)
+        Выход: tuple (url, headers, data) - готовый HTTP запрос
+        Логика: Заменяет плейсхолдеры в шаблонах, добавляет авторизацию
+        """
+        # Подготовка URL
+        url = strategy['url'].format(model_name=model['name'])
+
+        # Подготовка headers
+        headers = strategy['headers'].copy()
+
+        # Подготовка body данных
+        import json
+        body_template = json.dumps(strategy['body_template'])
+        body_template = body_template.replace('{model_name}', model.get('model_name', model['name']))
+        body_template = body_template.replace('{prompt}', prompt)
+        data = json.loads(body_template)
+
+        # Добавление параметров для Google API
+        if strategy.get('params'):
+            url += '?' + '&'.join([f'{k}={v}' for k, v in strategy['params'].items()])
+
+        return url, headers, data
+
+    def _parse_api_response(self, provider: str, response_text: str) -> str:
+        """
+        API: Парсинг ответа от LLM провайдера в единый формат
+        Вход: provider (идентификатор провайдера), response_text (сырой ответ)
+        Выход: str (текст ответа модели)
+        Логика: Обработка различных форматов ответов провайдеров
+        """
+        try:
+            response_data = json.loads(response_text)
+
+            if provider in ['openrouter', 'openai']:
+                # OpenAI-совместимый формат
+                return response_data['choices'][0]['message']['content']
+
+            elif provider == 'anthropic':
+                # Anthropic формат
+                return response_data['content'][0]['text']
+
+            elif provider == 'huggingface':
+                # HuggingFace формат
+                if isinstance(response_data, list) and len(response_data) > 0:
+                    if 'generated_text' in response_data[0]:
+                        return response_data[0]['generated_text']
+                    else:
+                        return str(response_data[0])
+                return str(response_data)
+
+            elif provider == 'google':
+                # Google AI формат
+                return response_data['candidates'][0]['content']['parts'][0]['text']
+
             else:
-                raise Exception(f"HuggingFace API error: {response.status_code} - {response.text}")
+                raise ValueError(f"Неизвестный формат ответа для провайдера: {provider}")
 
-    async def handle_rate_limit(self, error_msg: str, user_id: str) -> str:
+        except (KeyError, IndexError, json.JSONDecodeError) as e:
+            raise ValueError(f"Ошибка парсинга ответа {provider}: {e}")
+
+    def _handle_api_error(self, provider: str, status_code: int, response_text: str) -> Exception:
         """
-        API: Обработка лимитов запросов API
-        Вход: error_msg (текст ошибки), user_id (идентификатор пользователя)
-        Выход: str или None (сообщение пользователю или None для повторной попытки)
-        Логика: Анализирует тип лимита, возвращает сообщение или делает паузу
+        API: Обработка и классификация ошибок API провайдеров
+        Вход: provider (провайдер), status_code (HTTP статус), response_text (текст ошибки)
+        Выход: Exception (классифицированное исключение)
+        Логика: Анализ статуса и текста ошибки для определения типа ограничения
         """
-        if "free-models-per-day" in error_msg:
-            add_activity_log("WARNING", "Дневной лимит OpenRouter исчерпан", user_id)
-            return "⚠️ **Дневной лимит OpenRouter исчерпан** (50 запросов/день). Лимит сбросится в 03:00 по МСК."
+        error_message = f"{provider} API error {status_code}: {response_text}"
 
-        elif "free-models-per-min" in error_msg:
-            try:
-                error_data = json.loads(error_msg.split(" - ")[-1])
-                reset_time = int(error_data['error']['metadata']['headers']['X-RateLimit-Reset'])
-                current_time = int(time.time() * 1000)
-                wait_seconds = max(1, (reset_time - current_time) // 1000)
+        if status_code == 429:
+            return Exception(f"Rate limit exceeded for {provider}")
+        elif status_code == 401:
+            return Exception(f"Invalid API key for {provider}")
+        elif status_code == 402:
+            return Exception(f"Quota exceeded for {provider}")
+        elif status_code == 503:
+            return Exception(f"Service unavailable for {provider}")
+        else:
+            return Exception(error_message)
 
-                add_activity_log("INFO", f"Минутный лимит, ждем {wait_seconds} сек", user_id)
-                await asyncio.sleep(wait_seconds)
-                return None
+    async def _handle_api_limits(self, error_response: str, user_id: str) -> Optional[str]:
+        """
+        API: Обработка ограничений API и генерация пользовательских сообщений
+        Вход: error_response (текст ошибки), user_id (идентификатор пользователя)
+        Выход: str (сообщение пользователю) или None если не лимит
+        Логика: Анализ текста ошибки для определения типа ограничения
+        """
+        error_lower = error_response.lower()
 
-            except Exception as e:
-                add_activity_log("ERROR", f"Ошибка парсинга лимита: {e}", user_id)
-                await asyncio.sleep(60)
-                return None
+        if any(phrase in error_lower for phrase in ['rate limit', 'too many requests']):
+            add_activity_log("WARNING", f"Rate limit обнаружен: {error_response}", user_id)
+            return "⚠️ Превышено ограничение запросов. Попробуйте через 1-2 минуты."
 
-        elif "Rate limit exceeded" in error_msg or "429" in error_msg:
-            add_activity_log("WARNING", "Общий лимит, ждем 60 сек", user_id)
-            await asyncio.sleep(60)
-            return None
+        elif any(phrase in error_lower for phrase in ['quota', 'billing', 'daily']):
+            add_activity_log("ERROR", f"Исчерпана квота API: {error_response}", user_id)
+            return "⚠️ Исчерпан дневной лимит запросов. Лимит сбросится в 03:00 по МСК."
+
+        elif any(phrase in error_lower for phrase in ['authentication', 'invalid api key']):
+            add_activity_log("ERROR", f"Ошибка аутентификации API: {error_response}", user_id)
+            return "⚠️ Ошибка доступа к API. Обратитесь к администратору."
 
         return None
 
-    async def try_model_request(self, model: dict, messages: list, user_id: str) -> tuple:
+    def _build_prompt(self, history: List[Dict]) -> str:
         """
-        API: Попытка запроса к конкретной LLM модели
-        Вход: model (конфиг модели), messages (история диалога), user_id
-        Выход: tuple (ответ: str, успех: bool)
-        Логика: Выбор провайдера API, логирование метрик, обработка ошибок
+        API: Построение промпта из истории диалога
+        Вход: history (история сообщений)
+        Выход: str (форматированный промпт)
+        Логика: Конвертирует историю в формат, понятный моделям LLM
         """
-        start_time = time.time()
-        request_metrics = {
-            'timestamp': datetime.now().isoformat(),
-            'user_id': user_id,
-            'model': model['name'],
-            'provider': model['provider'],
-            'api_provider': model['api_provider'],
-            'model_params': model['params'],
-            'messages_count': len(messages),
-            'last_user_message': messages[-1]['content'][:100] if messages and messages[-1].get('content') else '',
-            'status': 'success',
-            'error_type': None,
-            'response_time_ms': 0,
-            'input_tokens': 0,
-            'output_tokens': 0,
-            'total_tokens': 0,
-            'cost_estimate': 0
-        }
+        if not history:
+            return "Привет! Чем могу помочь?"
 
-        try:
-            add_activity_log("DEBUG", f"Попытка запроса к {model['name']} ({model['api_provider']})", user_id)
-
-            if model['api_provider'] == 'openrouter':
-                result = await self.make_openrouter_request(model, messages)
-            elif model['api_provider'] == 'huggingface':
-                result = await self.make_huggingface_request(model, messages)
+        prompt = ""
+        for msg in history:
+            if msg["role"] == "user":
+                prompt += f"Пользователь: {msg['content']}\n"
             else:
-                raise ValueError(f"Unknown API provider: {model['api_provider']}")
+                prompt += f"Ассистент: {msg['content']}\n"
 
-            ai_response = result["response"]
+        prompt += "Ассистент: "
+        return prompt
 
-            if result["usage"]:
-                request_metrics.update({
-                    'input_tokens': result["usage"].prompt_tokens,
-                    'output_tokens': result["usage"].completion_tokens,
-                    'total_tokens': result["usage"].total_tokens
-                })
+    async def _log_llm_request(self, user_id: str, provider: str, model: str, endpoint: str,
+                               prompt_tokens: int = 0, completion_tokens: int = 0,
+                               success: bool = True, error_type: str = None,
+                               error_message: str = None, duration_ms: int = 0,
+                               estimated_limits: int = None):
+        """
+        API: Логирование запроса к LLM в базу данных
+        Вход: user_id, provider, model, endpoint, токены, статус, ошибки, время выполнения, лимиты
+        Выход: None (записывает в БД)
+        Логика: Создает запись о запросе для анализа лимитов и мониторинга использования
+        """
+        try:
+            # Если лимиты не указаны - оцениваем на основе успешности
+            if estimated_limits is None:
+                estimated_limits = 80 if success else 30
 
-                self.total_requests += 1
-                self.total_input_tokens += result["usage"].prompt_tokens
-                self.total_output_tokens += result["usage"].completion_tokens
+            request_id = create_llm_request(
+                user_id=user_id,
+                provider=provider,
+                model=model,
+                endpoint=endpoint,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                success=success,
+                error_type=error_type,
+                error_message=error_message,
+                request_duration_ms=duration_ms,
+                is_free_tier=True,
+                estimated_limits_remaining=estimated_limits
+            )
 
-            model_info = f"\n\n---\n*Отвечает {model['provider']} ({model['params']}B параметров) через {model['api_provider'].upper()}*"
-
-            request_metrics['response_time_ms'] = int((time.time() - start_time) * 1000)
-            request_metrics['cost_estimate'] = 0.0
-
-            add_activity_log("INFO", f"Успешный ответ от {model['provider']} через {model['api_provider']}", user_id)
-
-            log_llm_metrics(request_metrics)
-
-            return ai_response + model_info, True
+            add_activity_log("DEBUG", f"LLM запрос {provider}/{model} записан в БД", user_id)
+            return request_id
 
         except Exception as e:
-            error_msg = str(e)
-            request_metrics.update({
-                'status': 'error',
-                'error_type': self._classify_error(error_msg),
-                'response_time_ms': int((time.time() - start_time) * 1000)
-            })
+            add_activity_log("ERROR", f"Ошибка записи LLM запроса: {e}", user_id)
 
-            log_llm_metrics(request_metrics)
-
-            add_activity_log("ERROR", f"Ошибка {model['name']} ({model['api_provider']}): {error_msg}", user_id)
-            return error_msg, False
-
-    def _classify_error(self, error_msg: str) -> str:
+    def _estimate_tokens(self, text: str) -> int:
         """
-        API: Классификация ошибок API
-        Вход: error_msg (текст ошибки)
+        API: Примерная оценка количества токенов в тексте
+        Вход: text (текст для оценки)
+        Выход: int (примерное количество токенов)
+        Логика: Простая эвристика - ~4 символа на токен для английского, ~2 для русского
+        """
+        if not text:
+            return 0
+
+        # Простая эвристика для оценки токенов
+        russian_chars = sum(1 for c in text if 'а' <= c <= 'я' or 'А' <= c <= 'Я')
+        english_chars = len(text) - russian_chars
+
+        # ~4 символа на токен для английского, ~2 для русского
+        estimated_tokens = (english_chars // 4) + (russian_chars // 2)
+        return max(estimated_tokens, 1)
+
+    def _extract_error_type(self, error: Exception) -> str:
+        """
+        API: Извлечение типа ошибки из исключения
+        Вход: error (исключение)
         Выход: str (тип ошибки)
-        Логика: Анализирует текст ошибки для определения категории проблемы
+        Логика: Анализ текста ошибки для классификации типа ограничения
         """
-        if "429" in error_msg and "free-models-per-day" in error_msg:
-            return "daily_rate_limit"
-        elif "429" in error_msg and "free-models-per-min" in error_msg:
-            return "minute_rate_limit"
-        elif "429" in error_msg:
-            return "rate_limit"
-        elif "404" in error_msg:
-            return "model_not_found"
-        elif "401" in error_msg:
-            return "auth_error"
-        elif "500" in error_msg:
-            return "server_error"
+        error_str = str(error).lower()
+
+        if 'rate limit' in error_str or 'too many requests' in error_str:
+            return 'rate_limit'
+        elif 'quota' in error_str or 'billing' in error_str or 'daily' in error_str:
+            return 'quota_exceeded'
+        elif 'authentication' in error_str or 'invalid api key' in error_str:
+            return 'authentication_error'
+        elif 'timeout' in error_str:
+            return 'timeout'
+        elif 'network' in error_str or 'connection' in error_str:
+            return 'network_error'
         else:
-            return "unknown_error"
+            return 'unknown_error'
 
-    async def process_message(self, user_id: str, message: str) -> str:
+    def _estimate_limits_remaining(self, error: Exception = None) -> int:
         """
-        API: Основной метод обработки сообщений пользователя
-        Вход: user_id (идентификатор сессии), message (текст сообщения)
-        Выход: str (ответ ИИ)
-        Логика: Последовательно пробует модели из MODEL_RANKING, сохраняет историю диалога
+        API: Оценка остатка лимитов на основе ошибки
+        Вход: error (исключение или None)
+        Выход: int (процент остатка лимитов: 100=полные, 0=исчерпаны)
+        Логика: Анализ типа ошибки для оценки текущего состояния лимитов
         """
-        add_activity_log("INFO", f"Получено сообщение: '{message}'", user_id)
+        if error is None:
+            return 80
 
-        if user_id not in self.conversations:
-            self.conversations[user_id] = []
-            add_activity_log("DEBUG", f"Создана новая сессия для пользователя", user_id)
+        error_type = self._extract_error_type(error)
 
-        current_history = self.conversations[user_id][-self.max_history:]
-        current_history.append({"role": "user", "content": message})
+        if error_type == 'rate_limit':
+            return 10
+        elif error_type == 'quota_exceeded':
+            return 0
+        elif error_type == 'authentication_error':
+            return 100
+        else:
+            return 50
 
-        for model_index, model in enumerate(MODEL_RANKING):
-            add_activity_log("DEBUG", f"Пробуем модель #{model_index + 1}: {model['name']} ({model['api_provider']})",
-                             user_id)
-
-            response, success = await self.try_model_request(model, current_history, user_id)
-
-            if success:
-                current_history.append({"role": "assistant", "content": response})
-                self.conversations[user_id] = current_history[-self.max_history:]
-                add_activity_log("INFO", "Ответ сгенерирован успешно", user_id)
-                return response
-
-            else:
-                rate_limit_msg = await self.handle_rate_limit(response, user_id)
-                if rate_limit_msg:
-                    return rate_limit_msg
-
-                add_activity_log("INFO", f"Модель {model['name']} недоступна, пробуем следующую", user_id)
-                continue
-
-        error_msg = "❌ Все модели временно недоступны. Попробуйте позже."
-        add_activity_log("ERROR", "Все модели недоступны", user_id)
-        return error_msg
-
-    def get_usage_statistics(self) -> dict:
+    async def _rate_limit_protection(self):
         """
-        API: Получение статистики использования
+        API: Защита от слишком частых запросов
         Вход: None
-        Выход: dict (статистика запросов и токенов)
-        Логика: Агрегирует данные по всем выполненным запросам
+        Выход: None
+        Логика: Добавляет задержку между запросами для избежания rate limits
         """
-        return {
-            'total_requests': self.total_requests,
-            'total_input_tokens': self.total_input_tokens,
-            'total_output_tokens': self.total_output_tokens,
-            'total_tokens': self.total_input_tokens + self.total_output_tokens,
-            'avg_input_tokens_per_request': self.total_input_tokens / max(1, self.total_requests),
-            'avg_output_tokens_per_request': self.total_output_tokens / max(1, self.total_requests)
-        }
+        current_time = time.time()
+        time_since_last = current_time - self.last_request_time
 
-    async def background_model_checker(self):
+        if time_since_last < self.min_request_interval:
+            sleep_time = self.min_request_interval - time_since_last
+            await asyncio.sleep(sleep_time)
+
+        self.last_request_time = time.time()
+
+    def get_conversation_history(self, user_id: str) -> List[Dict]:
         """
-        API: Фоновая проверка доступности моделей
-        Вход: None
-        Выход: None (бесконечный цикл)
-        Логика: Периодически проверяет доступность топ-5 моделей раз в час
+        API: Получение истории диалога пользователя
+        Вход: user_id (идентификатор пользователя)
+        Выход: List[Dict] (история сообщений)
+        Логика: Возвращает сохраненную историю или пустой список
         """
-        add_activity_log("INFO", "Фоновая проверка моделей запущена")
-        while True:
-            try:
-                for i in range(min(5, len(MODEL_RANKING))):
-                    model = MODEL_RANKING[i]
-                    try:
-                        test_message = [{"role": "user", "content": "test"}]
-                        if model['api_provider'] == 'openrouter':
-                            await asyncio.wait_for(
-                                self.openrouter_client.chat.completions.create(
-                                    model=model["name"],
-                                    messages=test_message,
-                                    max_tokens=5
-                                ),
-                                timeout=10.0
-                            )
-                        else:
-                            async with httpx.AsyncClient() as client:
-                                await client.get(
-                                    f"{API_ENDPOINTS['huggingface']}/models/{model['name']}",
-                                    headers=self.huggingface_headers,
-                                    timeout=10.0
-                                )
-                        add_activity_log("DEBUG", f"Модель {model['name']} доступна")
-                    except Exception:
-                        add_activity_log("DEBUG", f"Модель {model['name']} недоступна")
+        return self.conversations.get(user_id, [])
 
-                await asyncio.sleep(3600)
-
-            except Exception as e:
-                add_activity_log("ERROR", f"Ошибка в фоновой проверке: {e}")
-                await asyncio.sleep(300)
-
-    def clear_history(self, user_id: str):
+    def clear_conversation_history(self, user_id: str) -> bool:
         """
         API: Очистка истории диалога пользователя
         Вход: user_id (идентификатор пользователя)
-        Выход: None
-        Логика: Удаляет историю сообщений для указанного пользователя
+        Выход: bool (успех операции)
+        Логика: Удаляет историю диалога из кэша
         """
         if user_id in self.conversations:
             del self.conversations[user_id]
-            add_activity_log("INFO", "История диалога очищена", user_id)
+            add_activity_log("INFO", f"История диалога очищена для {user_id}", user_id)
+            return True
+        return False
 
-def get_activity_logs():
+    def get_active_users(self) -> List[str]:
+        """
+        API: Получение списка активных пользователей
+        Вход: None
+        Выход: List[str] (список идентификаторов)
+        Логика: Возвращает ключи словаря conversations
+        """
+        return list(self.conversations.keys())
+
+    def get_usage_statistics(self) -> Dict[str, Any]:
+        """
+        API: Получение статистики использования агента
+        Вход: None
+        Выход: Dict (метрики использования)
+        Логика: Сбор основных метрик для мониторинга
+        """
+        return {
+            "active_users": len(self.conversations),
+            "total_conversations": sum(len(conv) for conv in self.conversations.values()),
+            "models_available": len(MODEL_RANKING),
+            "max_history_length": self.max_history
+        }
+
+
+# Глобальный экземпляр агента для использования в других модулях
+ai_agent = AIAgent()
+
+
+async def test_agent():
     """
-    API: Получение логов активности системы
+    API: Тестирование функциональности AI Agent
     Вход: None
-    Выход: list (список записей лога)
+    Выход: bool (результат тестирования)
+    Логика: Проверка основных функций агента на тестовых сообщениях
     """
-    return activity_logs
+    agent = AIAgent()
+    test_messages = [
+        "Привет!",
+        "Как дела?",
+        "Расскажи о себе"
+    ]
 
-def get_llm_metrics_sample(n: int = 10):
-    """
-    API: Получение выборки метрик LLM запросов
-    Вход: n (количество последних записей)
-    Выход: list (список метрик в формате JSON)
-    """
     try:
-        with open('llm_metrics.log', 'r', encoding='utf-8') as f:
-            lines = f.readlines()[-n:]
-            return [json.loads(line.strip()) for line in lines if line.strip()]
+        for msg in test_messages:
+            response = await agent.process_message("test_user", msg, "test")
+            print(f"Вопрос: {msg}")
+            print(f"Ответ: {response}")
+            print("-" * 50)
+
+        add_activity_log("INFO", "Тестирование агента завершено успешно", "system")
+        return True
     except Exception as e:
-        logger.error(f"Ошибка чтения лога метрик: {e}")
-        return []
+        add_activity_log("ERROR", f"Ошибка тестирования агента: {e}", "system")
+        return False
+
+
+if __name__ == "__main__":
+    """
+    Точка входа для прямого запуска агента
+    """
+    asyncio.run(test_agent())

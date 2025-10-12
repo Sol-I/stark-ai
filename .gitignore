@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 config.py
 *.log
+backup_*
 .DS_Store
 
 # PyCharm
@@ -11,3 +12,6 @@ config.py
 *.iml
 *.ipr
 misc.xml
+
+project_context.md
+noforget_notdelete.txt
