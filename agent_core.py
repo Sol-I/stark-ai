@@ -115,10 +115,12 @@ class AIAgent:
             return error_msg
 
     async def _try_model_request(self, model: Dict[str, Any], history: List[Dict],
-                                 user_id: str, endpoint: str) -> Tuple[str, bool]:
+                                 user_id: str, endpoint: str,
+                                 process_type: str = "chat", process_details: str = None) -> Tuple[str, bool]:
         """
         API: Попытка запроса к конкретной модели с полным логированием
-        Вход: model (конфиг модели), history (история диалога), user_id (идентификатор), endpoint (источник)
+        Вход: model (конфиг модели), history (история диалога), user_id (идентификатор),
+              endpoint (источник), process_type (тип процесса), process_details (детали процесса)
         Выход: tuple (response, success) - ответ и статус успеха
         Логика: Выполняет запрос к API с трекингом токенов, времени и ошибок
         """
@@ -147,7 +149,9 @@ class AIAgent:
                     completion_tokens=completion_tokens,
                     success=True,
                     duration_ms=duration_ms,
-                    estimated_limits=80
+                    estimated_limits=80,
+                    process_type=process_type,
+                    process_details=process_details
                 )
 
                 add_activity_log("INFO", f"Успешный ответ ({len(response)} символов)", user_id)
@@ -157,44 +161,7 @@ class AIAgent:
                 add_activity_log("WARNING", f"Пустой ответ от модели", user_id)
                 return "Пустой ответ от модели", False
 
-        except aiohttp.ClientError as e:
-            # Ошибки сети и соединения
-            duration_ms = int((time.time() - start_time) * 1000)
-            error_type = "network_error"
-            await self._log_llm_request(
-                user_id=user_id,
-                provider=model['api_provider'],
-                model=model['name'],
-                endpoint=endpoint,
-                prompt_tokens=self._estimate_tokens(prompt),
-                success=False,
-                error_type=error_type,
-                error_message=f"Network error: {str(e)}",
-                duration_ms=duration_ms,
-                estimated_limits=50
-            )
-            return f"Сетевая ошибка: {str(e)}", False
-
-        except asyncio.TimeoutError as e:
-            # Таймаут запроса
-            duration_ms = int((time.time() - start_time) * 1000)
-            error_type = "timeout"
-            await self._log_llm_request(
-                user_id=user_id,
-                provider=model['api_provider'],
-                model=model['name'],
-                endpoint=endpoint,
-                prompt_tokens=self._estimate_tokens(prompt),
-                success=False,
-                error_type=error_type,
-                error_message="Request timeout",
-                duration_ms=duration_ms,
-                estimated_limits=60
-            )
-            return "Таймаут запроса к API", False
-
         except Exception as e:
-            # Все остальные ошибки
             duration_ms = int((time.time() - start_time) * 1000)
             error_type = self._extract_error_type(e)
             estimated_limits = self._estimate_limits_remaining(e)
@@ -209,11 +176,13 @@ class AIAgent:
                 error_type=error_type,
                 error_message=f"API error: {str(e)}",
                 duration_ms=duration_ms,
-                estimated_limits=estimated_limits
+                estimated_limits=estimated_limits,
+                process_type=process_type,
+                process_details=process_details
             )
 
             return f"Ошибка API: {str(e)}", False
-
+        
     async def _call_universal_api(self, model: Dict[str, Any], prompt: str, user_id: str) -> str:
         """
         API: Универсальный вызов ко всем LLM провайдерам через единый интерфейс
