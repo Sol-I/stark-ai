@@ -65,7 +65,12 @@ def start_telegram_bot():
         logger.info("🤖 Starting Telegram bot in separate process...")
 
         # Запускаем бота в отдельном процессе
-        subprocess.Popen([sys.executable, "telegram_bot.py"])
+        telegram_thread = threading.Thread(
+            target=start_telegram_bot,
+            daemon=True,
+            name="Telegram-Bot"
+        )
+        telegram_thread.start()
 
     except Exception as e:
         error_msg = f"Ошибка запуска Telegram бота: {e}"
