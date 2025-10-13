@@ -182,7 +182,7 @@ class AIAgent:
             )
 
             return f"Ошибка API: {str(e)}", False
-        
+
     async def _call_universal_api(self, model: Dict[str, Any], prompt: str, user_id: str) -> str:
         """
         API: Универсальный вызов ко всем LLM провайдерам через единый интерфейс
@@ -432,10 +432,11 @@ class AIAgent:
                                prompt_tokens: int = 0, completion_tokens: int = 0,
                                success: bool = True, error_type: str = None,
                                error_message: str = None, duration_ms: int = 0,
-                               estimated_limits: int = None):
+                               estimated_limits: int = None, process_type: str = "chat",
+                               process_details: str = None):
         """
         API: Логирование запроса к LLM в базу данных
-        Вход: user_id, provider, model, endpoint, токены, статус, ошибки, время выполнения, лимиты
+        Вход: user_id, provider, model, endpoint, токены, статус, ошибки, время выполнения, лимиты, тип процесса, детали процесса
         Выход: None (записывает в БД)
         Логика: Создает запись о запросе для анализа лимитов и мониторинга использования
         """
@@ -456,7 +457,9 @@ class AIAgent:
                 error_message=error_message,
                 request_duration_ms=duration_ms,
                 is_free_tier=True,
-                estimated_limits_remaining=estimated_limits
+                estimated_limits_remaining=estimated_limits,
+                process_type=process_type,
+                process_details=process_details
             )
 
             add_activity_log("DEBUG", f"LLM запрос {provider}/{model} записан в БД", user_id)
@@ -464,7 +467,7 @@ class AIAgent:
 
         except Exception as e:
             add_activity_log("ERROR", f"Ошибка записи LLM запроса: {e}", user_id)
-
+            
     def _estimate_tokens(self, text: str) -> int:
         """
         API: Примерная оценка количества токенов в тексте
