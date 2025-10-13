@@ -52,31 +52,23 @@ def start_server():
 
 
 def start_telegram_bot():
-    """
-    API: Запуск Telegram бота в отдельном процессе
-    Вход: None
-    Выход: None (запуск в отдельном процессе)
-    Логика: Запуск бота в отдельном процессе чтобы избежать проблем с потоками
-    """
-    try:
-        import subprocess
-        import sys
-        add_activity_log("INFO", "Запуск Telegram бота в отдельном процессе...", "system")
-        logger.info("🤖 Starting Telegram bot in separate process...")
-
-        # Запускаем бота в отдельном процессе
-        telegram_thread = threading.Thread(
-            target=start_telegram_bot,
-            daemon=True,
-            name="Telegram-Bot"
-        )
-        telegram_thread.start()
-
-    except Exception as e:
-        error_msg = f"Ошибка запуска Telegram бота: {e}"
-        add_activity_log("ERROR", error_msg, "system")
-        logger.error(error_msg)
-
+    def start_telegram_bot():
+        """
+        API: Запуск Telegram бота в отдельном потоке
+        Вход: None
+        Выход: None (блокирующий вызов в потоке)
+        Логика: Импорт и запуск Telegram бота с обработкой ошибок
+        """
+        try:
+            from telegram_bot import TelegramBot
+            add_activity_log("INFO", "Запуск Telegram бота...", "system")
+            logger.info("🤖 Starting Telegram bot...")
+            bot = TelegramBot()
+            bot.run()  # Синхронный запуск polling
+        except Exception as e:
+            error_msg = f"Ошибка Telegram бота: {e}"
+            add_activity_log("ERROR", error_msg, "system")
+            logger.error(error_msg)
 
 async def monitor_services():
     """
