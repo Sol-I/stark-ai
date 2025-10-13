@@ -142,7 +142,7 @@ class TelegramBot:
             add_activity_log("INFO", "Запуск Telegram бота")
             logger.info("Telegram bot starting...")
 
-            application.run_polling()
+            application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
         except Exception as e:
             error_msg = f"Критическая ошибка Telegram бота: {e}"

@@ -53,23 +53,22 @@ def start_server():
 
 def start_telegram_bot():
     """
-    API: Запуск Telegram бота в отдельном потоке
+    API: Запуск Telegram бота в отдельном процессе
     Вход: None
-    Выход: None (блокирующий вызов в потоке)
-    Логика: Импорт и запуск Telegram бота с обработкой ошибок
+    Выход: None (запуск в отдельном процессе)
+    Логика: Запуск бота в отдельном процессе чтобы избежать проблем с потоками
     """
     try:
-        from telegram_bot import TelegramBot
-        add_activity_log("INFO", "Запуск Telegram бота...", "system")
-        logger.info("🤖 Starting Telegram bot...")
-        bot = TelegramBot()
-        bot.run()  # Синхронный запуск polling
-    except ImportError as e:
-        error_msg = f"Ошибка импорта Telegram бота: {e}"
-        add_activity_log("ERROR", error_msg, "system")
-        logger.error(error_msg)
+        import subprocess
+        import sys
+        add_activity_log("INFO", "Запуск Telegram бота в отдельном процессе...", "system")
+        logger.info("🤖 Starting Telegram bot in separate process...")
+
+        # Запускаем бота в отдельном процессе
+        subprocess.Popen([sys.executable, "telegram_bot.py"])
+
     except Exception as e:
-        error_msg = f"Ошибка Telegram бота: {e}"
+        error_msg = f"Ошибка запуска Telegram бота: {e}"
         add_activity_log("ERROR", error_msg, "system")
         logger.error(error_msg)
 
