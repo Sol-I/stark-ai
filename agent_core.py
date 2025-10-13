@@ -467,7 +467,7 @@ class AIAgent:
 
         except Exception as e:
             add_activity_log("ERROR", f"Ошибка записи LLM запроса: {e}", user_id)
-            
+
     def _estimate_tokens(self, text: str) -> int:
         """
         API: Примерная оценка количества токенов в тексте
