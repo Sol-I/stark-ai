@@ -120,20 +120,19 @@ class TelegramBot:
         logger.error(f"Ошибка в Telegram боте: {error}")
 
     def run(self):
-        """
-        API: Запуск Telegram бота
-        Вход: None
-        Выход: None (блокирующий вызов)
-        Логика: Простой запуск без создания event loop
-        """
-        application = Application.builder().token(self.token).build()
+        import asyncio
+        # Создаем event loop для этого потока
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
+        application = Application.builder().token(self.token).build()
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         application.add_error_handler(self.handle_error)
 
         logger.info("Telegram bot starting...")
         application.run_polling()
+        
 # Глобальный экземпляр для легкого доступа
 telegram_bot = TelegramBot()
 
