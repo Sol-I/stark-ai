@@ -27,6 +27,43 @@ except ImportError:
         print(f"📝 [{level}] {message} (user: {user_id})")
 
 
+def _log_operation_start(operation: str):
+    """
+    API: Логирование начала операции
+    Вход: operation (название операции)
+    Выход: None
+    Логика: Единообразное логирование старта операций
+    """
+    add_activity_log("INFO", f"Начало операции: {operation}")
+
+
+def _log_operation_result(operation: str, result: str):
+    """
+    API: Логирование результата операции
+    Вход: operation (название операции), result (результат)
+    Выход: None
+    Логика: Единообразное логирование завершения операций с размером данных
+    """
+    add_activity_log("INFO", f"Операция '{operation}' завершена ({len(result)} символов)")
+
+
+def copy_to_clipboard(content: str, command: str):
+    """
+    API: Копирование содержимого в буфер обмена
+    Вход: content (содержимое), command (имя команды для логирования)
+    Выход: None
+    Логика: Попытка копирования через pyperclip, только логирование в БД
+    """
+    try:
+        import pyperclip
+        pyperclip.copy(content)
+        add_activity_log("INFO", f"{command} скопирован в буфер обмена ({len(content)} символов)")
+    except ImportError:
+        add_activity_log("WARNING", f"{command} - pyperclip недоступен")
+    except Exception as e:
+        add_activity_log("ERROR", f"Ошибка копирования в буфер: {e}")
+
+
 class ProjectScanner:
     """
     API: Сканер структуры проекта
@@ -74,7 +111,7 @@ class ProjectScanner:
         Выход: str (дерево файлов в Markdown)
         Логика: Рекурсивный обход директорий, форматирование в древовидную структуру
         """
-        add_activity_log("INFO", "Генерация дерева структуры проекта")
+        _log_operation_start("сканирование структуры проекта")
         output = ["# Структура проекта\n"]
 
         def scan_directory(directory, level=0):
@@ -94,7 +131,7 @@ class ProjectScanner:
 
         scan_directory(self.root_dir)
         result = "\n".join(output)
-        add_activity_log("INFO", f"Сгенерировано дерево структуры ({len(result)} символов)")
+        _log_operation_result("сканирование структуры", result)
         return result
 
     def scan_api_documentation(self):
@@ -104,7 +141,7 @@ class ProjectScanner:
         Выход: str (структурированная документация API)
         Логика: Рекурсивный поиск Python файлов, извлечение классов и функций с докстрингами
         """
-        add_activity_log("INFO", "Сканирование API документации")
+        _log_operation_start("сканирование API документации")
 
         output = ["PROJECT API DOCUMENTATION:"]
         output.append("=" * 50)
@@ -122,7 +159,7 @@ class ProjectScanner:
                 output.append(api_docs)
 
         result = "\n".join(output)
-        add_activity_log("INFO", f"Сгенерирована API документация ({len(result)} символов)")
+        _log_operation_result("сканирование API документации", result)
         return result
 
     def extract_api_documentation(self, file_path):
@@ -157,60 +194,6 @@ class ProjectScanner:
 
         except Exception as e:
             return f"[Error reading {file_path.name}: {e}]"
-
-    def scan_full_code(self):
-        """
-        API: Сканирование полного кода проекта
-        Вход: None
-        Выход: str (структура + содержимое файлов)
-        Логика: Рекурсивный обход с извлечением содержимого важных файлов
-        """
-        add_activity_log("INFO", "Сканирование полного кода проекта")
-
-        output = ["PROJECT FULL CODE ANALYSIS:"]
-
-        # Структура
-        structure = []
-        file_paths = []
-
-        def collect_structure(directory, level=0):
-            try:
-                items = sorted(directory.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
-                for item in items:
-                    if self.should_ignore(item):
-                        continue
-                    indent = "  " * level
-                    if item.is_dir():
-                        structure.append(f"{indent}{item.name}/")
-                        collect_structure(item, level + 1)
-                    else:
-                        structure.append(f"{indent}{item.name}")
-                        file_paths.append(item)
-            except PermissionError:
-                structure.append(f"{'  ' * level}[Permission denied]")
-
-        collect_structure(self.root_dir)
-        output.append("STRUCTURE:")
-        output.extend(structure)
-        output.append("\n" + "=" * 50 + "\n")
-
-        # Содержимое файлов
-        output.append("FILE CONTENTS:")
-        for file_path in file_paths:
-            if file_path.suffix in ['.py', '.md', '.txt', '.json', '.yaml', '.yml', '.toml']:
-                output.append(f"\n--- FILE: {file_path.relative_to(self.root_dir)} ---")
-                try:
-                    content = file_path.read_text(encoding='utf-8', errors='ignore')
-                    if content.strip():
-                        output.append(content)
-                    else:
-                        output.append("[File is empty]")
-                except Exception as e:
-                    output.append(f"[Error reading file: {e}]")
-
-        result = "\n".join(output)
-        add_activity_log("INFO", f"Сгенерирован полный код ({len(result)} символов)")
-        return result
 
 
 def get_specific_code(file_procedure_pairs, root_dir='.'):
@@ -262,22 +245,12 @@ def get_specific_code(file_procedure_pairs, root_dir='.'):
 
     result = "\n\n".join(output)
 
-    # Копируем в буфер обмена с обработкой ошибок
+    # Копируем в буфер обмена через единую процедуру
     if result.strip():
-        try:
-            import pyperclip
-            pyperclip.copy(result)
-            add_activity_log("INFO", f"Код скопирован в буфер обмена ({len(result)} символов)")
-            print(f"✅ Код скопирован в буфер обмена ({len(result)} символов)")
-        except Exception as e:
-            # Fallback: вывод в консоль если буфер недоступен
-            add_activity_log("WARNING", f"Буфер обмена недоступен: {e}")
-            print("=" * 60)
-            print(result)
-            print("=" * 60)
-            print(f"📋 Код выведен в консоль ({len(result)} символов)")
+        copy_to_clipboard(result, "Извлеченный код")
 
     return result
+
 
 def extract_procedure_code(content, procedure_name, filename):
     """
@@ -412,14 +385,141 @@ def safe_code_modification(tasks: List[Dict]) -> Dict:
         }
 
 
+def get_database_ddl():
+    """
+    API: Генерация DDL для всех объектов базы данных PostgreSQL
+    Вход: None
+    Выход: str (SQL DDL для всех таблиц, индексов, constraints)
+    Логика: Запрос системных каталогов PostgreSQL для генерации полного DDL
+    """
+    try:
+        from database import SessionLocal
+        from datetime import datetime
+        from sqlalchemy import text  # ✅ Добавляем text
+
+        db = SessionLocal()
+        try:
+            # SQL для получения DDL всех таблиц
+            ddl_queries = [
+                # DDL для таблиц
+                text("""
+                SELECT 
+                    '-- Table: ' || n.nspname || '.' || c.relname || E'\n' ||
+                    'CREATE TABLE ' || n.nspname || '.' || c.relname || E' (\n' ||
+                    string_agg(
+                        '    ' || a.attname || ' ' || 
+                        pg_catalog.format_type(a.atttypid, a.atttypmod) ||
+                        CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END ||
+                        CASE WHEN a.atthasdef THEN ' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid) ELSE '' END,
+                        E',\n'
+                        ORDER BY a.attnum
+                    ) || E'\n);\n' ||
+                    COALESCE(
+                        E'\n-- Constraints for ' || n.nspname || '.' || c.relname || E'\n' ||
+                        string_agg(
+                            'ALTER TABLE ' || n.nspname || '.' || c.relname || 
+                            ' ADD CONSTRAINT ' || con.conname || ' ' || 
+                            pg_get_constraintdef(con.oid) || ';',
+                            E'\n'
+                        ) || E'\n',
+                        ''
+                    ) as ddl
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+                LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                LEFT JOIN pg_catalog.pg_constraint con ON con.conrelid = c.oid
+                WHERE c.relkind = 'r'  -- только обычные таблицы
+                    AND n.nspname NOT IN ('pg_catalog', 'pg_toast', 'information_schema')
+                    AND a.attnum > 0 AND NOT a.attisdropped
+                GROUP BY n.nspname, c.relname, c.oid
+                ORDER BY n.nspname, c.relname
+                """)
+            ]
+
+            # ✅ Исправляем устаревший datetime.utcnow()
+            from datetime import timezone
+            current_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+            full_ddl = ["-- PostgreSQL DDL for Stark AI Database", f"-- Generated on: {current_time}", ""]
+
+            for query in ddl_queries:
+                result = db.execute(query)
+                for row in result:
+                    if row[0] and row[0].strip():
+                        full_ddl.append(row[0])
+                        full_ddl.append("")
+
+            return "\n".join(full_ddl)
+
+        except Exception as e:
+            return f"-- Error generating DDL: {e}"
+        finally:
+            db.close()
+
+    except ImportError:
+        return "-- Database module not available"
+    except Exception as e:
+        return f"-- Error connecting to database: {e}"
+
+def scan_full_code():
+    """
+    API: Сканирование полного кода проекта (обновленная версия с DDL)
+    Вход: None
+    Выход: str (структура + содержимое файлов + DDL БД)
+    Логика: Рекурсивный обход с извлечением содержимого важных файлов и DDL БД
+    """
+    _log_operation_start("сканирование полного кода проекта")
+
+    output = ["PROJECT FULL CODE ANALYSIS:"]
+
+    # Структура проекта
+    scanner = ProjectScanner()
+    structure = scanner.scan_structure_tree().split('\n')[1:]  # Без заголовка
+    output.extend(structure)
+    output.append("\n" + "=" * 50 + "\n")
+
+    # Содержимое файлов
+    output.append("FILE CONTENTS:")
+    root_path = Path('.')
+    python_files = list(root_path.rglob('*.py'))
+    other_files = list(root_path.rglob('*.md')) + list(root_path.rglob('*.txt')) + list(root_path.rglob('*.json'))
+
+    all_files = python_files + other_files
+
+    for file_path in all_files:
+        if scanner.should_ignore(file_path):
+            continue
+
+        output.append(f"\n--- FILE: {file_path.relative_to(root_path)} ---")
+        try:
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            if content.strip():
+                output.append(content)
+            else:
+                output.append("[File is empty]")
+        except Exception as e:
+            output.append(f"[Error reading file: {e}]")
+
+    # Добавляем DDL базы данных
+    output.append("\n" + "=" * 50 + "\n")
+    output.append("DATABASE DDL:")
+    output.append("=" * 50)
+    ddl = get_database_ddl()
+    output.append(ddl)
+
+    result = "\n".join(output)
+    _log_operation_result("сканирование полного кода", result)
+    return result
+
+
 def generate_project_context():
     """
-    API: Генерация технического контекста проекта
+    API: Генерация технического контекста проекта (обновленная версия с DDL)
     Вход: None
     Выход: str (отформатированный контекст в Markdown)
-    Логика: Сбор структуры проекта, API документации и системных данных с раздельной обработкой ошибок
+    Логика: Сбор структуры проекта, API документации, системных данных и DDL БД
     """
-    add_activity_log("INFO", "Генерация технического контекста проекта")
+    _log_operation_start("генерация технического контекста проекта")
 
     import json
     from datetime import datetime
@@ -428,7 +528,8 @@ def generate_project_context():
         "generated_at": datetime.now().isoformat(),
         "project": {},
         "database": {},
-        "system_status": {}
+        "system_status": {},
+        "database_ddl": ""  # НОВОЕ: добавляем DDL
     }
 
     # 1. Информация о проекте
@@ -447,17 +548,14 @@ def generate_project_context():
         context["project"]["error"] = str(e)
         add_activity_log("ERROR", f"Ошибка сканирования проекта: {e}")
 
-    # 2. Системные данные - раздельная обработка ошибок
+    # 2. Системные данные
     try:
         from database import get_recent_logs, get_recent_tasks, SessionLocal, LogEntry, ModificationTask
     except ImportError as e:
         context["database"]["error"] = f"Модуль БД недоступен: {e}"
-        add_activity_log("ERROR", f"Ошибка импорта БД: {e}")
     except Exception as e:
         context["database"]["error"] = f"Ошибка загрузки БД: {e}"
-        add_activity_log("ERROR", f"Ошибка загрузки БД: {e}")
     else:
-        # Если импорт успешен - работаем с БД
         db = None
         try:
             db = SessionLocal()
@@ -485,8 +583,7 @@ def generate_project_context():
                         "file": task.file,
                         "status": task.status,
                         "level": task.level,
-                        "desc": task.desc[:100] + "..." if len(
-                            task.desc) > 100 else task.desc
+                        "desc": task.desc[:100] + "..." if len(task.desc) > 100 else task.desc
                     }
                     for task in recent_tasks
                 ]
@@ -495,7 +592,6 @@ def generate_project_context():
 
         except Exception as e:
             context["database"]["error"] = f"Ошибка подключения к БД: {e}"
-            add_activity_log("ERROR", f"Ошибка подключения к БД: {e}")
         finally:
             if db:
                 db.close()
@@ -515,6 +611,9 @@ def generate_project_context():
     except Exception as e:
         context["system_status"]["error"] = str(e)
         add_activity_log("ERROR", f"Ошибка получения статуса системы: {e}")
+
+    # 4. НОВОЕ: Добавляем DDL базы данных
+    context["database_ddl"] = get_database_ddl()
 
     # Форматируем в Markdown
     markdown_output = f"""# Stark AI Project - Technical Context
@@ -542,6 +641,10 @@ def generate_project_context():
 ## 📋 API Documentation
 {context['project'].get('api_documentation', 'N/A')}
 
+## 🗃️ Database DDL
+{context['database_ddl']}
+    
+
 ## 📊 Recent Activity
 
 ### Last 5 Logs:
@@ -554,30 +657,30 @@ def generate_project_context():
 *Context automatically generated by Stark AI System*
 """
 
-    add_activity_log("INFO", f"Сгенерирован техконтекст ({len(markdown_output)} символов)")
+    _log_operation_result("генерация технического контекста", markdown_output)
     return markdown_output
 
 
-def copy_to_clipboard(content: str, command: str):
+def print_database_ddl():
     """
-    API: Копирование содержимого в буфер обмена
-    Вход: content (содержимое), command (имя команды для логирования)
-    Выход: None
-    Логика: Попытка копирования через pyperclip, fallback в файл при ошибке
+    API: Вывод DDL структуры базы данных
+    Вход: None
+    Выход: None (вывод в консоль + копирование в буфер)
+    Логика: Генерация полного SQL DDL для всех объектов БД
     """
-    try:
-        import pyperclip
-        pyperclip.copy(content)
-        add_activity_log("INFO", f"{command} скопирован в буфер обмена ({len(content)} символов)")
-        print(f"✅ Результат скопирован в буфер обмена ({len(content)} символов)")
-    except ImportError:
-        # Сохраняем в файл если pyperclip не установлен
-        context_file = f"{command}_output.txt"
-        with open(context_file, "w", encoding="utf-8") as f:
-            f.write(content)
-        add_activity_log("WARNING", f"{command} сохранен в {context_file} (pyperclip недоступен)")
-        print(f"✅ Результат сохранен в {context_file}!")
-        print("📋 Скопируй содержимое файла вручную (Ctrl+A, Ctrl+C)")
+    _log_operation_start("генерация DDL базы данных")
+
+    ddl = get_database_ddl()
+
+    print("🗄️ DATABASE DDL STRUCTURE")
+    print("=" * 80)
+    print(ddl)
+    print("=" * 80)
+
+    # Копируем в буфер обмена
+    copy_to_clipboard(ddl, "DDL базы данных")
+
+    _log_operation_result("генерация DDL", ddl)
 
 
 def main():
@@ -592,9 +695,9 @@ def main():
     # Основные команды
     parser.add_argument('--tree', action='store_true', help='Структура проекта в Markdown → буфер')
     parser.add_argument('--api', action='store_true', help='API документация → буфер')
-    parser.add_argument('--fullcode', action='store_true', help='Полный код проекта → буфер')
-    parser.add_argument('--context', action='store_true',
-                        help='Техконтекст (структура + API + системные данные) → буфер')
+    parser.add_argument('--fullcode', action='store_true', help='Полный код проекта с DDL → буфер')  # ОБНОВЛЕНО
+    parser.add_argument('--context', action='store_true', help='Техконтекст с DDL → буфер')  # ОБНОВЛЕНО
+    parser.add_argument('--ddl', action='store_true', help='DDL структура базы данных → буфер')  # НОВОЕ
 
     # Дополнительные команды
     parser.add_argument('--code', nargs='+', action='append', metavar=('FILE', 'PROCEDURE'),
@@ -621,13 +724,17 @@ def main():
             return
 
         elif args.fullcode:
-            result = scanner.scan_full_code()
-            copy_to_clipboard(result, "Полный код")
+            result = scan_full_code()  # Теперь включает DDL
+            copy_to_clipboard(result, "Полный код с DDL")
             return
 
         elif args.context:
-            result = generate_project_context()
-            copy_to_clipboard(result, "Технический контекст")
+            result = generate_project_context()  # Теперь включает DDL
+            copy_to_clipboard(result, "Технический контекст с DDL")
+            return
+
+        elif args.ddl:  # НОВАЯ КОМАНДА - только DDL
+            print_database_ddl()
             return
 
         elif args.code:
@@ -644,7 +751,6 @@ def main():
                     return
 
             result = get_specific_code(file_procedure_pairs, args.root)
-            print(result)
             return
 
         elif args.modify:

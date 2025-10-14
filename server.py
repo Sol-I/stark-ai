@@ -20,6 +20,8 @@ try:
 except ImportError:
     def add_activity_log(level: str, message: str, user_id: str = None):
         print(f"📝 [{level}] {message} (user: {user_id})")
+
+
     db_add_activity_log = add_activity_log
 
 # Настройка логирования
@@ -38,6 +40,7 @@ app = FastAPI(
 # Глобальный экземпляр агента
 agent = AIAgent()
 
+
 class MessageRequest(BaseModel):
     """
     API: Модель запроса чата
@@ -48,6 +51,7 @@ class MessageRequest(BaseModel):
     user_id: str
     message: str
 
+
 class ClearRequest(BaseModel):
     """
     API: Модель запроса очистки истории
@@ -56,6 +60,7 @@ class ClearRequest(BaseModel):
     Логика: Валидация входящих данных для эндпоинта /api/clear
     """
     user_id: str
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -67,6 +72,7 @@ async def startup_event():
     """
     add_activity_log("INFO", "FastAPI сервер запущен", "system")
     logger.info("🚀 FastAPI сервер запущен на http://localhost:8000")
+
 
 @app.post("/api/chat")
 async def chat_endpoint(request: MessageRequest):
@@ -95,6 +101,7 @@ async def chat_endpoint(request: MessageRequest):
         add_activity_log("ERROR", error_msg, request.user_id)
         logger.error(error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
+
 
 @app.post("/api/clear")
 async def clear_history(request: ClearRequest):
@@ -128,6 +135,7 @@ async def clear_history(request: ClearRequest):
         logger.error(error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
 
+
 @app.get("/api/health")
 async def health_check():
     """
@@ -148,6 +156,83 @@ async def health_check():
         logger.error(f"Ошибка health check: {e}")
         raise HTTPException(status_code=503, detail="Service unavailable")
 
+
+@app.get("/api/logs")
+async def get_recent_logs(limit: int = 50):
+    """
+    API: Получение последних логов для веб-интерфейса
+    Вход: limit (количество логов, по умолчанию 50)
+    Выход: JSON {logs: List[Dict], status: str}
+    Логика: Получение логов из БД, форматирование для фронтенда
+    """
+    try:
+        from database import get_recent_logs
+
+        logs = get_recent_logs(limit)
+
+        # Форматируем логи для фронтенда
+        formatted_logs = []
+        for log in logs:
+            formatted_logs.append({
+                'level': log.level,
+                'message': log.message,
+                'user_id': log.user_id or 'system',
+                'timestamp': log.timestamp.strftime('%H:%M:%S') if log.timestamp else 'unknown'
+            })
+
+        return {
+            "logs": formatted_logs,
+            "status": "success",
+            "total": len(formatted_logs)
+        }
+
+    except Exception as e:
+        logger.error(f"Ошибка получения логов: {e}")
+        return {
+            "logs": [],
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@app.get("/api/models")
+async def get_available_models():
+    """
+    API: Получение списка доступных моделей
+    Вход: None
+    Выход: JSON {models: List[Dict], status: str}
+    Логика: Получение списка моделей из AI Agent, форматирование для фронтенда
+    """
+    try:
+        # Убедимся что агент инициализирован
+        await agent.ensure_initialized()
+
+        models = []
+        if hasattr(agent, 'model_ranking') and agent.model_ranking:
+            for model in agent.model_ranking[:10]:  # первые 10 моделей
+                models.append({
+                    'name': model.get('name', 'Unknown'),
+                    'provider': model.get('api_provider', 'Unknown'),
+                    'description': model.get('description', '')[:100] + '...' if len(
+                        model.get('description', '')) > 100 else model.get('description', ''),
+                    'context_length': model.get('context_length', 0)
+                })
+
+        return {
+            "models": models,
+            "status": "success",
+            "total": len(models)
+        }
+
+    except Exception as e:
+        logger.error(f"Ошибка получения моделей: {e}")
+        return {
+            "models": [],
+            "status": "error",
+            "error": str(e)
+        }
+
+
 @app.get("/")
 async def web_interface():
     """
@@ -165,8 +250,10 @@ async def web_interface():
         logger.error(error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
 
+
 # Монтирование статических файлов
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 def run_server(host: str = "0.0.0.0", port: int = 8000):
     """
@@ -192,6 +279,7 @@ def run_server(host: str = "0.0.0.0", port: int = 8000):
         add_activity_log("ERROR", error_msg, "system")
         logger.error(error_msg)
         raise
+
 
 if __name__ == "__main__":
     """

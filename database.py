@@ -5,10 +5,11 @@ API: Управление базой данных PostgreSQL, CRUD операц�
 Основные возможности: автоматическое логирование, отслеживание задач модификации кода
 """
 
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Boolean, Integer
+from sqlalchemy import create_engine, Column, String, DateTime, Text, Boolean, Integer, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from datetime import datetime
+from datetime import datetime, timezone
+from datetime import timedelta
 import uuid
 
 Base = declarative_base()
@@ -22,12 +23,17 @@ class LogEntry(Base):
     Логика: Автоматически генерирует ID и timestamp при создании
     """
     __tablename__ = 'logs'
+    __table_args__ = (
+        Index('idx_logs_timestamp', 'timestamp'),
+        Index('idx_logs_level', 'level'),
+        Index('idx_logs_user_id', 'user_id'),
+    )
 
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     level = Column(String)  # INFO, ERROR, DEBUG, WARNING
     message = Column(Text)
     user_id = Column(String)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     def __repr__(self):
         return f"<Log({self.level}) {self.message[:50]}...>"
@@ -41,10 +47,16 @@ class ModificationTask(Base):
     Логика: Поддерживает родительские/дочерние задачи, управление разрешениями, отслеживание статусов
     """
     __tablename__ = 'modification_tasks'
+    __table_args__ = (
+        Index('idx_tasks_status', 'status'),
+        Index('idx_tasks_created', 'created_at'),
+        Index('idx_tasks_level', 'level'),
+        Index('idx_tasks_parent', 'parent_id'),
+    )
 
     # Идентификаторы
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    parent_id = Column(String, nullable=True)  # ID родительской задачи
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    parent_id = Column(String(36), nullable=True)  # ID родительской задачи
 
     # Данные модификации
     file = Column(String, nullable=False)  # Файл для изменения
@@ -58,15 +70,13 @@ class ModificationTask(Base):
 
     # Статусы
     status = Column(String, default="new")  # new, hold, ready, done
-    created_at = Column(DateTime, default=datetime.utcnow)  # Время создания
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # Время создания
     completed_dt = Column(DateTime, nullable=True)  # Время реализации
     error_message = Column(Text, nullable=True)  # Лог ошибки
 
     def __repr__(self):
         return f"<ModificationTask({self.status}) {self.file}>"
 
-
-# В database.py после класса ModificationTask
 
 class LLMRequest(Base):
     """
@@ -76,8 +86,15 @@ class LLMRequest(Base):
     Логика: Трекинг использования лимитов, мониторинг ошибок и распределения запросов
     """
     __tablename__ = 'llm_requests'
+    __table_args__ = (
+        Index('idx_llm_timestamp', 'timestamp'),
+        Index('idx_llm_user_timestamp', 'user_id', 'timestamp'),
+        Index('idx_llm_provider_success', 'provider', 'success'),
+        Index('idx_llm_process_type', 'process_type'),
+        Index('idx_llm_error_type', 'error_type'),
+    )
 
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String)  # Кто сделал запрос
     provider = Column(String, nullable=False)  # openai, anthropic, google, openrouter
     model = Column(String, nullable=False)  # gpt-4, claude-3-opus, gemini-pro
@@ -85,7 +102,7 @@ class LLMRequest(Base):
     prompt_tokens = Column(Integer, default=0)  # Токены промпта
     completion_tokens = Column(Integer, default=0)  # Токены ответа
     total_tokens = Column(Integer, default=0)  # Всего токенов
-    timestamp = Column(DateTime, default=datetime.utcnow)  # Время запроса
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # Время запроса
     success = Column(Boolean, default=True)  # Успешен ли запрос
     error_type = Column(String)  # rate_limit, quota_exceeded, etc
     error_message = Column(Text)  # Детальное сообщение об ошибке
@@ -219,7 +236,7 @@ def update_task_status(task_id: str, status: str, error_message: str = None, per
         if task:
             task.status = status
             if status == "done":
-                task.completed_dt = datetime.utcnow()
+                task.completed_dt = datetime.now(timezone.utc)
             if error_message is not None:
                 task.error_message = error_message
             if perm is not None:
@@ -303,8 +320,6 @@ def get_ready_tasks():
         db.close()
 
 
-# В database.py после функций для ModificationTask
-
 def create_llm_request(
         user_id: str,
         provider: str,
@@ -380,11 +395,14 @@ def get_provider_limits_status(provider: str = None):
     API: Получение статуса лимитов провайдеров
     Вход: provider (опционально - конкретный провайдер)
     Выход: Dict (статистика по лимитам)
-    Логика: Анализ использования лимитов за сегодня
+    Логика: Анализ использования лимитов за последние 24 часа
     """
     db = SessionLocal()
     try:
         from sqlalchemy import func, case
+
+        # Анализ за последние 24 часа вместо текущего дня
+        time_threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
 
         query = db.query(
             LLMRequest.provider,
@@ -397,7 +415,7 @@ def get_provider_limits_status(provider: str = None):
         if provider:
             query = query.filter(LLMRequest.provider == provider)
 
-        query = query.filter(LLMRequest.timestamp >= func.current_date())
+        query = query.filter(LLMRequest.timestamp >= time_threshold)
         query = query.group_by(LLMRequest.provider)
 
         results = query.all()
@@ -415,5 +433,14 @@ def get_provider_limits_status(provider: str = None):
 
         return limits_status
 
+    except Exception as e:
+        logger.error(f"Error getting provider limits: {e}")
+        return {}
     finally:
         db.close()
+
+
+# Настройка логирования для модуля
+import logging
+
+logger = logging.getLogger(__name__)

@@ -14,13 +14,11 @@ from typing import Dict, List, Tuple, Optional, Any
 # Конфигурация системы
 from config import (
     OPENROUTER_API_KEY,
-    HUGGINGFACE_API_KEY,
-    OPENAI_API_KEY,
-    ANTHROPIC_API_KEY,
-    GOOGLE_API_KEY,
-    MODEL_RANKING,
+    DEEPSEEK_API_KEY,
     MAX_HISTORY_LENGTH,
-    REQUEST_TIMEOUT
+    REQUEST_TIMEOUT,
+    API_STRATEGIES,
+    API_ENDPOINTS
 )
 
 # Импорт системы логирования
@@ -28,7 +26,7 @@ from database import add_activity_log, create_llm_request
 
 # Настройка логирования
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -49,13 +47,193 @@ class AIAgent:
         Логика: Инициализация кэшей, истории диалогов, метрик использования
         """
         self.conversations: Dict[str, List[Dict]] = {}
+        self.model_ranking: List[Dict] = []
+        self.initialized = False
+        self.initialization_lock = asyncio.Lock()
         self.max_history = MAX_HISTORY_LENGTH or 10
         self.request_timeout = REQUEST_TIMEOUT or 30
         self.last_request_time = 0
         self.min_request_interval = 0.1
 
-        add_activity_log("INFO", "AI Agent инициализирован с системой мониторинга лимитов", "system")
-        logger.info("AI Agent initialized with %d models", len(MODEL_RANKING))
+        add_activity_log("INFO", "AI Agent инициализирован (ленивая загрузка моделей)", "system")
+        logger.info("AI Agent initialized with lazy model loading")
+
+    async def ensure_initialized(self):
+        """
+        API: Гарантирует что модели загружены и ранжированы
+        Вход: None
+        Выход: None
+        Логика: Ленивая загрузка моделей при первом вызове, защита от гонок
+        """
+        if not self.initialized:
+            async with self.initialization_lock:
+                if not self.initialized:  # Double-check
+                    await self._load_free_models_ranking()
+                    self.initialized = True
+                    logger.info(f"Модели загружены: {len(self.model_ranking)} шт")
+
+    async def _load_free_models_ranking(self):
+        """С отладкой"""
+        try:
+            add_activity_log("INFO", "Начало загрузки моделей из OpenRouter", "system")
+
+            models = await self._fetch_models_from_openrouter()
+            logger.info(f"Получено {len(models)} моделей из API")
+
+            # Отладка: покажем первые 3 модели
+            for i, model in enumerate(models[:3]):
+                logger.debug(f"Модель {i}: {model.get('id')} - pricing: {model.get('pricing')}")
+
+            if not models:
+                raise Exception("Не удалось загрузить модели из OpenRouter")
+
+            free_models = self._filter_free_models(models)
+            logger.info(f"После фильтрации: {len(free_models)} моделей")
+
+            if not free_models:
+                # Покажем почему не прошли фильтрацию
+                for model in models[:5]:
+                    pricing = model.get('pricing', {})
+                    logger.debug(
+                        f"Модель {model.get('id')}: prompt={pricing.get('prompt')}, completion={pricing.get('completion')}")
+                raise Exception("Не найдено бесплатных моделей")
+
+            self.model_ranking = self._rank_models_by_parameters(free_models)
+
+            add_activity_log("INFO", f"Загружено {len(self.model_ranking)} бесплатных моделей", "system")
+            logger.info(f"Топ-3 модели: {[m['name'] for m in self.model_ranking[:3]]}")
+
+        except Exception as e:
+            error_msg = f"Ошибка загрузки моделей: {e}"
+            add_activity_log("ERROR", error_msg, "system")
+            logger.error(error_msg)
+            self.model_ranking = self._get_fallback_models()
+
+    async def _fetch_models_from_openrouter(self) -> List[Dict]:
+        """
+        API: Получение списка моделей из OpenRouter API
+        Вход: None
+        Выход: List[Dict] (список моделей)
+        Логика: HTTP запрос к /api/v1/models, парсинг JSON ответа
+        """
+        url = "https://openrouter.ai/api/v1/models"
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=30) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get('data', [])
+                    else:
+                        raise Exception(f"HTTP {response.status}: {await response.text()}")
+        except Exception as e:
+            logger.error(f"Ошибка получения моделей: {e}")
+            return []
+
+    def _filter_free_models(self, models: List[Dict]) -> List[Dict]:
+        """Фильтрация бесплатных моделей - более гибкая"""
+        free_models = []
+        for model in models:
+            try:
+                pricing = model.get('pricing', {})
+
+                # Более гибкая проверка бесплатности
+                is_free = (
+                        pricing.get('prompt') == "0" or
+                        pricing.get('prompt') == 0 or
+                        pricing.get('prompt') is None
+                )
+
+                # Активные модели с описанием
+                is_active = model.get('active', False) or True  # Многие модели без active флага
+                has_description = bool(model.get('description'))
+
+                if is_free and has_description:
+                    free_models.append(model)
+
+            except Exception as e:
+                logger.debug(f"Ошибка проверки модели {model.get('id')}: {e}")
+                continue
+
+        logger.info(f"Найдено {len(free_models)} бесплатных моделей из {len(models)}")
+        return free_models
+
+    def _rank_models_by_parameters(self, models: List[Dict]) -> List[Dict]:
+        """
+        API: Ранжирование моделей по мощности (параметрам)
+        Вход: models (список бесплатных моделей)
+        Выход: List[Dict] (отсортированные модели)
+        Логика: Сортировка по убыванию параметров, затем по другим критериям
+        """
+        def get_model_parameters(model: Dict) -> int:
+            """Извлекает количество параметров модели"""
+            # Пробуем разные поля где могут быть параметры
+            description = model.get('description', '').lower()
+            context_length = model.get('context_length', 0)
+
+            # Ищем числа с суффиксами параметров
+            import re
+            param_patterns = [
+                r'(\d+)b\b',  # 7b, 13b, 70b
+                r'(\d+)b\s+parameters',  # 7b parameters
+                r'(\d+)\s+billion',  # 7 billion
+            ]
+
+            for pattern in param_patterns:
+                match = re.search(pattern, description)
+                if match:
+                    return int(match.group(1)) * 1_000_000_000  # Конвертируем в числа
+
+            # Фолбэк на context_length
+            return context_length
+
+        def get_model_score(model: Dict) -> Tuple[int, int, int]:
+            """Создает кортеж для сортировки: параметры, контекст, приоритет"""
+            params = get_model_parameters(model)
+            context = model.get('context_length', 0)
+            # Приоритет по провайдеру (deepseek > другие)
+            provider_priority = 2 if 'deepseek' in model.get('id', '').lower() else 1
+            return (params, context, provider_priority)
+
+        # Сортируем по убыванию мощности
+        sorted_models = sorted(models, key=get_model_score, reverse=True)
+
+        # Конвертируем в формат для agent_core
+        ranked_models = []
+        for model in sorted_models:
+            ranked_models.append({
+                'name': model['id'],
+                'api_provider': 'openrouter',  # Все из OpenRouter
+                'model_name': model['id'],
+                'description': model.get('description', ''),
+                'context_length': model.get('context_length', 0)
+            })
+
+        return ranked_models
+
+    def _get_fallback_models(self) -> List[Dict]:
+        """Рабочие резервные модели"""
+        logger.warning("Используются резервные модели")
+        return [
+            {
+                'name': 'deepseek/deepseek-chat',
+                'api_provider': 'deepseek',  # ✅ Правильный провайдер
+                'model_name': 'deepseek-chat',
+                'description': 'DeepSeek Chat (67B) - резервная модель',
+                'context_length': 8192
+            },
+            {
+                'name': 'google/gemma-7b-it',
+                'api_provider': 'openrouter',
+                'model_name': 'google/gemma-7b-it',
+                'description': 'Google Gemma 7B - резервная модель',
+                'context_length': 8192
+            }
+        ]
 
     async def process_message(self, user_id: str, message: str, endpoint: str = "unknown",
                               process_type: str = "chat",
@@ -64,9 +242,12 @@ class AIAgent:
         API: Основной метод обработки сообщений пользователя
         Вход: user_id (идентификатор сессии), message (текст сообщения), endpoint (источник запроса), process_type (тип процесса), process_details (детали)
         Выход: str (ответ ИИ или сообщение об ошибке)
-        Логика: Последовательно пробует модели из MODEL_RANKING, логирует все операции в БД
+        Логика: Последовательно пробует модели из model_ranking, логирует все операции в БД
         """
         try:
+            # Ленивая загрузка моделей при первом вызове
+            await self.ensure_initialized()
+
             add_activity_log("INFO", f"Получено сообщение через {endpoint}: '{message[:100]}...'", user_id)
 
             # Защита от слишком частых запросов
@@ -82,12 +263,13 @@ class AIAgent:
             current_history.append({"role": "user", "content": message})
 
             # Последовательная попытка моделей по приоритету
-            for model_index, model in enumerate(MODEL_RANKING):
+            for model_index, model in enumerate(self.model_ranking):
                 model_info = f"{model['name']} ({model['api_provider']})"
                 add_activity_log("DEBUG", f"Попытка #{model_index + 1}: {model_info}", user_id)
 
-                response, success = await self._try_model_request(model, current_history, user_id, endpoint,
-                                                                  process_type, process_details)
+                response, success, prompt_tokens, completion_tokens = await self._try_model_request(
+                    model, current_history, user_id, endpoint, process_type, process_details
+                )
 
                 if success:
                     # Успешный ответ - сохраняем историю и возвращаем результат
@@ -96,11 +278,7 @@ class AIAgent:
                     add_activity_log("INFO", f"Успешный ответ от {model_info}", user_id)
                     return response
                 else:
-                    # Обработка ограничений лимитов
-                    limit_msg = await self._handle_api_limits(response, user_id)
-                    if limit_msg:
-                        return limit_msg
-
+                    # Продолжаем ротацию при ошибках
                     add_activity_log("INFO", f"Модель {model_info} недоступна", user_id)
                     continue
 
@@ -116,12 +294,12 @@ class AIAgent:
 
     async def _try_model_request(self, model: Dict[str, Any], history: List[Dict],
                                  user_id: str, endpoint: str,
-                                 process_type: str = "chat", process_details: str = None) -> Tuple[str, bool]:
+                                 process_type: str = "chat", process_details: str = None) -> Tuple[str, bool, int, int]:
         """
         API: Попытка запроса к конкретной модели с полным логированием
         Вход: model (конфиг модели), history (история диалога), user_id (идентификатор),
               endpoint (источник), process_type (тип процесса), process_details (детали процесса)
-        Выход: tuple (response, success) - ответ и статус успеха
+        Выход: tuple (response, success, prompt_tokens, completion_tokens) - ответ, статус и токены
         Логика: Выполняет запрос к API с трекингом токенов, времени и ошибок
         """
         start_time = time.time()
@@ -131,13 +309,11 @@ class AIAgent:
             add_activity_log("DEBUG", f"Запрос к {model['name']}", user_id)
 
             # Универсальный вызов API
-            response = await self._call_universal_api(model, prompt, user_id)
+            response, prompt_tokens, completion_tokens = await self._call_universal_api(model, prompt, user_id)
 
             # Обработка успешного ответа
             if response and response.strip():
                 duration_ms = int((time.time() - start_time) * 1000)
-                prompt_tokens = self._estimate_tokens(prompt)
-                completion_tokens = self._estimate_tokens(response)
 
                 # Логирование успешного запроса в БД
                 await self._log_llm_request(
@@ -155,11 +331,11 @@ class AIAgent:
                 )
 
                 add_activity_log("INFO", f"Успешный ответ ({len(response)} символов)", user_id)
-                return response, True
+                return response, True, prompt_tokens, completion_tokens
             else:
                 # Пустой ответ
                 add_activity_log("WARNING", f"Пустой ответ от модели", user_id)
-                return "Пустой ответ от модели", False
+                return "Пустой ответ от модели", False, 0, 0
 
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
@@ -171,7 +347,7 @@ class AIAgent:
                 provider=model['api_provider'],
                 model=model['name'],
                 endpoint=endpoint,
-                prompt_tokens=self._estimate_tokens(prompt),
+                prompt_tokens=self._estimate_tokens_fallback(prompt),
                 success=False,
                 error_type=error_type,
                 error_message=f"API error: {str(e)}",
@@ -181,14 +357,14 @@ class AIAgent:
                 process_details=process_details
             )
 
-            return f"Ошибка API: {str(e)}", False
+            return f"Ошибка API: {str(e)}", False, 0, 0
 
-    async def _call_universal_api(self, model: Dict[str, Any], prompt: str, user_id: str) -> str:
+    async def _call_universal_api(self, model: Dict[str, Any], prompt: str, user_id: str) -> Tuple[str, int, int]:
         """
         API: Универсальный вызов ко всем LLM провайдерам через единый интерфейс
         Вход: model (конфиг модели), prompt (промпт), user_id (идентификатор)
-        Выход: str (ответ модели)
-        Логика: Определяет стратегию провайдера, строит запрос, парсит ответ
+        Выход: tuple (ответ, prompt_tokens, completion_tokens)
+        Логика: Определяет стратегию провайдера, строит запрос, парсит ответ с токенами
         """
         provider = model['api_provider']
         strategy = self._get_provider_strategy(provider)
@@ -199,166 +375,113 @@ class AIAgent:
         # Построение запроса
         url, headers, data = self._build_api_request(strategy, model, prompt)
 
-        # Выполнение HTTP запроса
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=data, timeout=self.request_timeout) as response:
-                response_text = await response.text()
+        try:
+            # Выполнение HTTP запроса
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=data, timeout=self.request_timeout) as response:
+                    response_text = await response.text()
 
-                if response.status == 200:
-                    # Успешный ответ - парсим
-                    return self._parse_api_response(provider, response_text)
-                else:
-                    # Ошибка - классифицируем и выбрасываем исключение
-                    raise self._handle_api_error(provider, response.status, response_text)
+                    if response.status == 200:
+                        # Успешный ответ - парсим с токенами
+                        return self._parse_api_response_with_tokens(provider, response_text)
+                    else:
+                        # Ошибка - классифицируем и выбрасываем исключение
+                        raise self._handle_api_error(provider, response.status, response_text)
+
+        except Exception as e:
+            logger.error(f"HTTP запрос к {provider} провал: {e}")
+            raise
 
     def _get_provider_strategy(self, provider: str) -> Dict[str, Any]:
         """
         API: Получение конфигурации для конкретного провайдера
         Вход: provider (идентификатор провайдера)
         Выход: Dict (стратегия провайдера) или None если неизвестен
-        Логика: Возвращает настройки endpoints, headers, форматы для каждого провайдера
         """
-        strategies = {
-            'openrouter': {
-                'url': 'https://openrouter.ai/api/v1/chat/completions',
-                'headers': {
-                    'Authorization': f'Bearer {OPENROUTER_API_KEY}',
-                    'Content-Type': 'application/json',
-                    'HTTP-Referer': 'https://stark-ai.com',
-                    'X-Title': 'Stark AI Assistant'
-                },
-                'body_template': {
-                    'model': '{model_name}',
-                    'messages': [{'role': 'user', 'content': '{prompt}'}],
-                    'max_tokens': 1000,
-                    'temperature': 0.7
-                },
-                'response_parser': 'openai_format'
-            },
-            'huggingface': {
-                'url': 'https://api-inference.huggingface.co/models/{model_name}',
-                'headers': {
-                    'Authorization': f'Bearer {HUGGINGFACE_API_KEY}',
-                    'Content-Type': 'application/json'
-                },
-                'body_template': {
-                    'inputs': '{prompt}',
-                    'parameters': {
-                        'max_new_tokens': 1000,
-                        'temperature': 0.7,
-                        'return_full_text': False
-                    }
-                },
-                'response_parser': 'huggingface_format'
-            },
-            'openai': {
-                'url': 'https://api.openai.com/v1/chat/completions',
-                'headers': {
-                    'Authorization': f'Bearer {OPENAI_API_KEY}',
-                    'Content-Type': 'application/json'
-                },
-                'body_template': {
-                    'model': '{model_name}',
-                    'messages': [{'role': 'user', 'content': '{prompt}'}],
-                    'max_tokens': 1000,
-                    'temperature': 0.7
-                },
-                'response_parser': 'openai_format'
-            },
-            'anthropic': {
-                'url': 'https://api.anthropic.com/v1/messages',
-                'headers': {
-                    'x-api-key': ANTHROPIC_API_KEY,
-                    'Content-Type': 'application/json',
-                    'anthropic-version': '2023-06-01'
-                },
-                'body_template': {
-                    'model': '{model_name}',
-                    'max_tokens': 1000,
-                    'temperature': 0.7,
-                    'messages': [{'role': 'user', 'content': '{prompt}'}]
-                },
-                'response_parser': 'anthropic_format'
-            },
-            'google': {
-                'url': 'https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent',
-                'headers': {
-                    'Content-Type': 'application/json'
-                },
-                'body_template': {
-                    'contents': [{
-                        'parts': [{'text': '{prompt}'}]
-                    }],
-                    'generationConfig': {
-                        'maxOutputTokens': 1000,
-                        'temperature': 0.7
-                    }
-                },
-                'response_parser': 'google_format',
-                'params': {'key': GOOGLE_API_KEY}
-            }
-        }
+        return API_STRATEGIES.get(provider)
 
-        return strategies.get(provider)
-
-    def _build_api_request(self, strategy: Dict[str, Any], model: Dict[str, Any], prompt: str) -> Tuple[
-        str, Dict, Dict]:
+    def _build_api_request(self, strategy: Dict[str, Any], model: Dict[str, Any], prompt: str) -> Tuple[str, Dict, Dict]:
         """
         API: Построение HTTP запроса для выбранного провайдера
         Вход: strategy (стратегия провайдера), model (конфиг модели), prompt (промпт)
         Выход: tuple (url, headers, data) - готовый HTTP запрос
         Логика: Заменяет плейсхолдеры в шаблонах, добавляет авторизацию
         """
-        # Подготовка URL
-        url = strategy['url'].format(model_name=model['name'])
+        try:
+            # Получаем endpoint для провайдера
+            endpoint = API_ENDPOINTS.get(model['api_provider'], '')
 
-        # Подготовка headers
-        headers = strategy['headers'].copy()
+            # Подготовка URL с подстановкой endpoint
+            url = strategy['url'].format(endpoint=endpoint, model_name=model['name'])
 
-        # Подготовка body данных
-        import json
-        body_template = json.dumps(strategy['body_template'])
-        body_template = body_template.replace('{model_name}', model.get('model_name', model['name']))
-        body_template = body_template.replace('{prompt}', prompt)
-        data = json.loads(body_template)
+            # Подготовка headers с подстановкой API ключа
+            headers = {}
+            for key, value in strategy['headers'].items():
+                if '{api_key}' in value:
+                    api_key = ""
+                    if model['api_provider'] == 'openrouter':
+                        api_key = OPENROUTER_API_KEY
+                    elif model['api_provider'] == 'deepseek':
+                        api_key = DEEPSEEK_API_KEY
+                    headers[key] = value.format(api_key=api_key)
+                else:
+                    headers[key] = value
 
-        # Добавление параметров для Google API
-        if strategy.get('params'):
-            url += '?' + '&'.join([f'{k}={v}' for k, v in strategy['params'].items()])
+            # Подготовка тела запроса
+            import json
+            escaped_prompt = json.dumps(prompt)[1:-1]  # Убираем кавычки json.dumps
 
-        return url, headers, data
+            body_template = json.dumps(strategy['body_template'])
+            body_template = body_template.replace('{model_name}', model.get('model_name', model['name']))
+            body_template = body_template.replace('{prompt}', escaped_prompt)
+            data = json.loads(body_template)
+
+            return url, headers, data
+
+        except Exception as e:
+            logger.error(f"Ошибка построения API запроса: {e}")
+            raise
+
+    def _parse_api_response_with_tokens(self, provider: str, response_text: str) -> Tuple[str, int, int]:
+        """
+        API: Парсинг ответа от LLM провайдера с извлечением токенов
+        Вход: provider (идентификатор провайдера), response_text (сырой ответ)
+        Выход: tuple (текст ответа, prompt_tokens, completion_tokens)
+        Логика: Обработка различных форматов ответов провайдеров с извлечением usage данных
+        """
+        try:
+            response_data = json.loads(response_text)
+            prompt_tokens = 0
+            completion_tokens = 0
+
+            if provider in ['openrouter', 'deepseek']:
+                # OpenAI-совместимый формат
+                text = response_data['choices'][0]['message']['content']
+                if 'usage' in response_data:
+                    prompt_tokens = response_data['usage'].get('prompt_tokens', 0)
+                    completion_tokens = response_data['usage'].get('completion_tokens', 0)
+                return text, prompt_tokens, completion_tokens
+
+            else:
+                # Для других провайдеров - базовая обработка
+                text = self._parse_api_response(provider, response_text)
+                prompt_tokens = self._estimate_tokens_fallback(text)
+                return text, prompt_tokens, 0
+
+        except (KeyError, IndexError, json.JSONDecodeError) as e:
+            raise ValueError(f"Ошибка парсинга ответа {provider}: {e}")
 
     def _parse_api_response(self, provider: str, response_text: str) -> str:
         """
-        API: Парсинг ответа от LLM провайдера в единый формат
+        API: Парсинг ответа от LLM провайдера в единый формат (базовая версия)
         Вход: provider (идентификатор провайдера), response_text (сырой ответ)
         Выход: str (текст ответа модели)
-        Логика: Обработка различных форматов ответов провайдеров
         """
         try:
             response_data = json.loads(response_text)
 
-            if provider in ['openrouter', 'openai']:
-                # OpenAI-совместимый формат
+            if provider in ['openrouter', 'deepseek']:
                 return response_data['choices'][0]['message']['content']
-
-            elif provider == 'anthropic':
-                # Anthropic формат
-                return response_data['content'][0]['text']
-
-            elif provider == 'huggingface':
-                # HuggingFace формат
-                if isinstance(response_data, list) and len(response_data) > 0:
-                    if 'generated_text' in response_data[0]:
-                        return response_data[0]['generated_text']
-                    else:
-                        return str(response_data[0])
-                return str(response_data)
-
-            elif provider == 'google':
-                # Google AI формат
-                return response_data['candidates'][0]['content']['parts'][0]['text']
-
             else:
                 raise ValueError(f"Неизвестный формат ответа для провайдера: {provider}")
 
@@ -384,29 +507,6 @@ class AIAgent:
             return Exception(f"Service unavailable for {provider}")
         else:
             return Exception(error_message)
-
-    async def _handle_api_limits(self, error_response: str, user_id: str) -> Optional[str]:
-        """
-        API: Обработка ограничений API и генерация пользовательских сообщений
-        Вход: error_response (текст ошибки), user_id (идентификатор пользователя)
-        Выход: str (сообщение пользователю) или None если не лимит
-        Логика: Анализ текста ошибки для определения типа ограничения
-        """
-        error_lower = error_response.lower()
-
-        if any(phrase in error_lower for phrase in ['rate limit', 'too many requests']):
-            add_activity_log("WARNING", f"Rate limit обнаружен: {error_response}", user_id)
-            return "⚠️ Превышено ограничение запросов. Попробуйте через 1-2 минуты."
-
-        elif any(phrase in error_lower for phrase in ['quota', 'billing', 'daily']):
-            add_activity_log("ERROR", f"Исчерпана квота API: {error_response}", user_id)
-            return "⚠️ Исчерпан дневной лимит запросов. Лимит сбросится в 03:00 по МСК."
-
-        elif any(phrase in error_lower for phrase in ['authentication', 'invalid api key']):
-            add_activity_log("ERROR", f"Ошибка аутентификации API: {error_response}", user_id)
-            return "⚠️ Ошибка доступа к API. Обратитесь к администратору."
-
-        return None
 
     def _build_prompt(self, history: List[Dict]) -> str:
         """
@@ -462,29 +562,23 @@ class AIAgent:
                 process_details=process_details
             )
 
-            add_activity_log("DEBUG", f"LLM запрос {provider}/{model} записан в БД", user_id)
+            logger.debug(f"LLM запрос {provider}/{model} записан в БД")
             return request_id
 
         except Exception as e:
-            add_activity_log("ERROR", f"Ошибка записи LLM запроса: {e}", user_id)
+            logger.error(f"Ошибка записи LLM запроса: {e}")
 
-    def _estimate_tokens(self, text: str) -> int:
+    def _estimate_tokens_fallback(self, text: str) -> int:
         """
-        API: Примерная оценка количества токенов в тексте
+        API: Фолбэк оценка токенов когда данные от API недоступны
         Вход: text (текст для оценки)
         Выход: int (примерное количество токенов)
-        Логика: Простая эвристика - ~4 символа на токен для английского, ~2 для русского
+        Логика: Упрощенная эвристика для случаев когда API не возвращает usage
         """
         if not text:
             return 0
-
-        # Простая эвристика для оценки токенов
-        russian_chars = sum(1 for c in text if 'а' <= c <= 'я' or 'А' <= c <= 'Я')
-        english_chars = len(text) - russian_chars
-
-        # ~4 символа на токен для английского, ~2 для русского
-        estimated_tokens = (english_chars // 4) + (russian_chars // 2)
-        return max(estimated_tokens, 1)
+        # Более простая и консервативная оценка
+        return max(len(text) // 3, 1)
 
     def _extract_error_type(self, error: Exception) -> str:
         """
@@ -586,7 +680,7 @@ class AIAgent:
         return {
             "active_users": len(self.conversations),
             "total_conversations": sum(len(conv) for conv in self.conversations.values()),
-            "models_available": len(MODEL_RANKING),
+            "models_available": len(self.model_ranking),
             "max_history_length": self.max_history
         }
 
@@ -603,6 +697,8 @@ async def test_agent():
     Логика: Проверка основных функций агента на тестовых сообщениях
     """
     agent = AIAgent()
+    await agent.ensure_initialized()  # Явная инициализация для теста
+
     test_messages = [
         "Привет!",
         "Как дела?",

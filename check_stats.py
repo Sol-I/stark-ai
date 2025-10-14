@@ -34,26 +34,48 @@ def print_usage_statistics():
         print("📊 СТАТИСТИКА ИСПОЛЬЗОВАНИЯ LLM")
         print("=" * 50)
 
-        print(f"Общие запросы: {stats.get('total_requests', 0)}")
-        print(f"Успешные запросы: {stats.get('successful_requests', 0)}")
-        print(f"Ошибочные запросы: {stats.get('failed_requests', 0)}")
-        print(f"Входные токены: {stats.get('total_input_tokens', 0):,}")
-        print(f"Выходные токены: {stats.get('total_output_tokens', 0):,}")
-        print(f"Всего токенов: {stats.get('total_tokens', 0):,}")
+        print(f"Активные пользователи: {stats.get('active_users', 0)}")
+        print(f"Всего диалогов: {stats.get('total_conversations', 0)}")
+        print(f"Доступно моделей: {stats.get('models_available', 0)}")
+        print(f"Глубина истории: {stats.get('max_history_length', 0)}")
 
-        if stats.get('total_requests', 0) > 0:
-            avg_input = stats.get('total_input_tokens', 0) / stats.get('total_requests', 1)
-            avg_output = stats.get('total_output_tokens', 0) / stats.get('total_requests', 1)
-            print(f"Средние токены/запрос: {avg_input:.1f} вх / {avg_output:.1f} вых")
+        # Дополнительная статистика из БД
+        try:
+            from database import SessionLocal, LLMRequest
+            db = SessionLocal()
+            try:
+                total_requests = db.query(LLMRequest).count()
+                successful_requests = db.query(LLMRequest).filter(LLMRequest.success == True).count()
+                failed_requests = db.query(LLMRequest).filter(LLMRequest.success == False).count()
 
-        # Оценка стоимости (примерные цены)
-        input_cost = stats.get('total_input_tokens', 0) * 0.000001  # ~$0.001/1K tokens
-        output_cost = stats.get('total_output_tokens', 0) * 0.000002  # ~$0.002/1K tokens
-        total_cost = input_cost + output_cost
-        print(f"Примерная стоимость: ${total_cost:.4f}")
+                total_input_tokens = db.query(LLMRequest.prompt_tokens).filter(
+                    LLMRequest.prompt_tokens.isnot(None)).scalar() or 0
+                total_output_tokens = db.query(LLMRequest.completion_tokens).filter(
+                    LLMRequest.completion_tokens.isnot(None)).scalar() or 0
 
-        success_rate = (stats.get('successful_requests', 0) / stats.get('total_requests', 1)) * 100
-        print(f"Успешность: {success_rate:.1f}%")
+                print(f"\n📈 СТАТИСТИКА ИЗ БАЗЫ ДАННЫХ:")
+                print(f"Всего запросов: {total_requests}")
+                print(f"Успешных запросов: {successful_requests}")
+                print(f"Ошибочных запросов: {failed_requests}")
+                print(f"Входные токены: {total_input_tokens:,}")
+                print(f"Выходные токены: {total_output_tokens:,}")
+                print(f"Всего токенов: {total_input_tokens + total_output_tokens:,}")
+
+                if total_requests > 0:
+                    success_rate = (successful_requests / total_requests) * 100
+                    print(f"Успешность: {success_rate:.1f}%")
+
+                    # Оценка стоимости (примерные цены)
+                    input_cost = total_input_tokens * 0.000001
+                    output_cost = total_output_tokens * 0.000002
+                    total_cost = input_cost + output_cost
+                    print(f"Примерная стоимость: ${total_cost:.4f}")
+
+            finally:
+                db.close()
+
+        except Exception as e:
+            print(f"⚠️  Не удалось получить статистику из БД: {e}")
 
     except ImportError:
         print("❌ AI Agent недоступен")
@@ -69,41 +91,44 @@ def print_recent_metrics(limit=10):
     API: Вывод последних метрик запросов к LLM
     Вход: limit (количество записей для показа)
     Выход: None (вывод в консоль)
-    Логика: Получение сэмпла метрик, форматирование и вывод детальной информации
+    Логика: Получение последних LLM запросов из БД и форматированный вывод
     """
     try:
-        from agent_core import get_llm_metrics_sample
-        metrics = get_llm_metrics_sample(limit)
+        from database import get_recent_llm_requests, SessionLocal
 
-        add_activity_log("INFO", f"Запрос {limit} последних метрик", "stats_monitor")
+        db = SessionLocal()
+        try:
+            requests = get_recent_llm_requests(limit)
 
-        print(f"\n🕒 ПОСЛЕДНИЕ {limit} ЗАПРОСОВ LLM")
-        print("=" * 50)
+            add_activity_log("INFO", f"Запрос {limit} последних LLM запросов", "stats_monitor")
 
-        if not metrics:
-            print("📭 Нет данных о запросах")
-            return
+            print(f"\n🕒 ПОСЛЕДНИЕ {len(requests)} LLM ЗАПРОСОВ")
+            print("=" * 80)
 
-        for i, metric in enumerate(metrics, 1):
-            print(f"\n#{i} | {metric.get('timestamp', 'N/A')}")
-            print(f"  Модель: {metric.get('model', 'N/A')}")
-            print(f"  Провайдер: {metric.get('api_provider', 'N/A')}")
-            print(f"  Статус: {metric.get('status', 'N/A')}")
-            print(f"  Время ответа: {metric.get('response_time_ms', 'N/A')}ms")
-            print(f"  Токены: {metric.get('input_tokens', 0)} вх / {metric.get('output_tokens', 0)} вых")
+            if not requests:
+                print("📭 В базе нет записей о LLM запросах")
+                return
 
-            if metric.get('error_type'):
-                print(f"  ❌ Ошибка: {metric.get('error_type')}")
-                if metric.get('error_message'):
-                    print(f"     Сообщение: {metric.get('error_message')}")
+            for i, req in enumerate(requests, 1):
+                status = "✅ УСПЕХ" if req.success else "❌ ОШИБКА"
+                tokens_info = f"Токены: {req.prompt_tokens}+{req.completion_tokens}" if req.prompt_tokens else "Токены: не указано"
+                error_info = f" | Ошибка: {req.error_type}" if not req.success and req.error_type else ""
 
-    except ImportError:
-        print("❌ Модуль метрик недоступен")
-        add_activity_log("ERROR", "Модуль метрик недоступен", "stats_monitor")
+                print(f"{i:2d}. {status} | {req.provider:12} | {req.model:30} | {tokens_info}{error_info}")
+                print(f"     Время: {req.request_duration_ms}мс | Пользователь: {req.user_id} | {req.timestamp}")
+
+                if req.error_message and not req.success:
+                    print(f"     Сообщение: {req.error_message[:100]}...")
+
+        finally:
+            db.close()
+
+    except ImportError as e:
+        print(f"❌ Ошибка импорта модуля БД: {e}")
+        add_activity_log("ERROR", f"Ошибка импорта БД в print_recent_metrics: {e}", "stats_monitor")
     except Exception as e:
-        error_msg = f"Ошибка получения метрик: {e}"
-        print(f"❌ {error_msg}")
-        add_activity_log("ERROR", error_msg, "stats_monitor")
+        print(f"❌ Ошибка получения метрик: {e}")
+        add_activity_log("ERROR", f"Ошибка получения метрик: {e}", "stats_monitor")
 
 
 def analyze_rate_limits(limit=20):
@@ -114,46 +139,58 @@ def analyze_rate_limits(limit=20):
     Логика: Статистический анализ ошибок, выявление паттернов лимитов, рекомендации
     """
     try:
-        from agent_core import get_llm_metrics_sample
-        metrics = get_llm_metrics_sample(limit)
+        from database import get_recent_llm_requests, SessionLocal
 
-        add_activity_log("INFO", f"Анализ лимитов для {limit} запросов", "stats_monitor")
+        db = SessionLocal()
+        try:
+            requests = get_recent_llm_requests(limit)
 
-        error_count = sum(1 for m in metrics if m.get('status') == 'error')
-        rate_limit_count = sum(
-            1 for m in metrics if m.get('error_type') in ['rate_limit', 'daily_rate_limit', 'minute_rate_limit'])
+            add_activity_log("INFO", f"Анализ лимитов для {limit} запросов", "stats_monitor")
 
-        print(f"\n🚨 АНАЛИЗ ОШИБОК LLM (последние {limit} запросов)")
-        print("=" * 50)
-        print(f"Всего запросов: {len(metrics)}")
-        print(f"Ошибок: {error_count}")
-        print(f"Лимиты: {rate_limit_count}")
+            if not requests:
+                print("📭 Нет данных для анализа")
+                return
 
-        if rate_limit_count > 0:
-            print("\n⚠️  Обнаружены проблемы с лимитами API!")
-            print("Рекомендации:")
-            print("1. Проверить настройки rate limiting в конфигурации")
-            print("2. Увеличить паузы между запросами в agent_core.py")
-            print("3. Добавить ротацию API ключей при лимитах")
-            print("4. Включить кэширование повторных запросов")
-        else:
-            print("\n✅ Проблем с лимитами не обнаружено")
+            error_count = sum(1 for req in requests if not req.success)
+            rate_limit_count = sum(
+                1 for req in requests if req.error_type and 'rate_limit' in req.error_type.lower())
 
-        # Анализ по провайдерам
-        provider_errors = {}
-        for metric in metrics:
-            if metric.get('status') == 'error':
-                provider = metric.get('api_provider', 'unknown')
-                provider_errors[provider] = provider_errors.get(provider, 0) + 1
+            print(f"\n🚨 АНАЛИЗ ОШИБОК LLM (последние {len(requests)} запросов)")
+            print("=" * 50)
+            print(f"Всего запросов: {len(requests)}")
+            print(f"Ошибок: {error_count}")
+            print(f"Лимиты: {rate_limit_count}")
 
-        if provider_errors:
-            print(f"\n📊 Ошибки по провайдерам:")
-            for provider, count in provider_errors.items():
-                print(f"  {provider}: {count} ошибок")
+            if rate_limit_count > 0:
+                print("\n⚠️  Обнаружены проблемы с лимитами API!")
+                print("Рекомендации:")
+                print("1. Проверить настройки rate limiting в конфигурации")
+                print("2. Увеличить паузы между запросами в agent_core.py")
+                print("3. Добавить ротацию API ключей при лимитах")
+                print("4. Включить кэширование повторных запросов")
+            elif error_count > 0:
+                print("\n⚠️  Есть ошибки, но не связанные с лимитами")
+            else:
+                print("\n✅ Проблем с лимитами не обнаружено")
+
+            # Анализ по провайдерам
+            provider_errors = {}
+            for req in requests:
+                if not req.success:
+                    provider = req.provider
+                    provider_errors[provider] = provider_errors.get(provider, 0) + 1
+
+            if provider_errors:
+                print(f"\n📊 Ошибки по провайдерам:")
+                for provider, count in provider_errors.items():
+                    print(f"  {provider}: {count} ошибок")
+
+        finally:
+            db.close()
 
     except ImportError:
-        print("❌ Модуль метрик недоступен для анализа")
-        add_activity_log("ERROR", "Модуль метрик недоступен для анализа", "stats_monitor")
+        print("❌ Модуль базы данных недоступен для анализа")
+        add_activity_log("ERROR", "Модуль БД недоступен для анализа", "stats_monitor")
     except Exception as e:
         error_msg = f"Ошибка анализа лимитов: {e}"
         print(f"❌ {error_msg}")
@@ -188,6 +225,8 @@ def print_database_stats():
                 print(f"\n📋 Последние 5 логов:")
                 for log in recent_logs:
                     print(f"  [{log.level}] {log.timestamp.strftime('%H:%M:%S')} {log.message[:50]}...")
+            else:
+                print(f"\n📋 Логов нет")
 
             # Активные задачи
             recent_tasks = get_recent_tasks(5)
@@ -196,6 +235,8 @@ def print_database_stats():
                 for task in recent_tasks:
                     status_icon = "✅" if task.status == "completed" else "🔄" if task.status == "in_progress" else "⏳"
                     print(f"  {status_icon} [{task.status}] {task.file}")
+            else:
+                print(f"\n📝 Задач нет")
 
         finally:
             db.close()

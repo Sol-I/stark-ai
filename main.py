@@ -11,6 +11,9 @@ import time
 import logging
 from datetime import datetime
 
+# Импорт конфигурации
+from config import HOST, PORT
+
 # Импорт системы логирования
 try:
     from database import add_activity_log
@@ -38,9 +41,9 @@ def start_server():
     """
     try:
         from server import run_server
-        add_activity_log("INFO", "Запуск FastAPI сервера...", "system")
-        logger.info("🚀 Starting FastAPI server...")
-        run_server(host="0.0.0.0", port=8000)
+        add_activity_log("INFO", f"Запуск FastAPI сервера на {HOST}:{PORT}...", "system")
+        logger.info(f"🚀 Starting FastAPI server on {HOST}:{PORT}...")
+        run_server(host=HOST, port=PORT)
     except ImportError as e:
         error_msg = f"Ошибка импорта сервера: {e}"
         add_activity_log("ERROR", error_msg, "system")
@@ -52,23 +55,23 @@ def start_server():
 
 
 def start_telegram_bot():
-    def start_telegram_bot():
-        """
-        API: Запуск Telegram бота в отдельном потоке
-        Вход: None
-        Выход: None (блокирующий вызов в потоке)
-        Логика: Импорт и запуск Telegram бота с обработкой ошибок
-        """
-        try:
-            from telegram_bot import TelegramBot
-            add_activity_log("INFO", "Запуск Telegram бота...", "system")
-            logger.info("🤖 Starting Telegram bot...")
-            bot = TelegramBot()
-            bot.run()  # Синхронный запуск polling
-        except Exception as e:
-            error_msg = f"Ошибка Telegram бота: {e}"
-            add_activity_log("ERROR", error_msg, "system")
-            logger.error(error_msg)
+    """
+    API: Запуск Telegram бота в отдельном потоке
+    Вход: None
+    Выход: None (блокирующий вызов в потоке)
+    Логика: Импорт и запуск Telegram бота с обработкой ошибок
+    """
+    try:
+        from telegram_bot import TelegramBot
+        add_activity_log("INFO", "Запуск Telegram бота...", "system")
+        logger.info("🤖 Starting Telegram bot...")
+        bot = TelegramBot()
+        bot.run()  # Синхронный запуск polling
+    except Exception as e:
+        error_msg = f"Ошибка Telegram бота: {e}"
+        add_activity_log("ERROR", error_msg, "system")
+        logger.error(error_msg)
+
 
 async def monitor_services():
     """
@@ -115,9 +118,12 @@ async def main():
 
     # Показываем информацию о системе
     try:
-        from config import MODEL_RANKING
+        from agent_core import AIAgent
+        agent = AIAgent()
+        await agent.ensure_initialized()
+
         logger.info("📊 Доступные модели AI:")
-        for i, model in enumerate(MODEL_RANKING[:5], 1):
+        for i, model in enumerate(agent.model_ranking[:5], 1):
             status = "✅" if i == 1 else "🟡"
             model_info = f"{status} {i}. {model.get('name', 'Unknown')} - {model.get('api_provider', 'Unknown')}"
             print(f"   {model_info}")
@@ -166,7 +172,7 @@ async def main():
     # Выводим информацию о запуске
     startup_info = [
         "✅ СИСТЕМА ЗАПУЩЕНА",
-        "🌐 Веб-интерфейс: http://localhost:8000",
+        f"🌐 Веб-интерфейс: http://{HOST}:{PORT}",
         "🌐 Внешний доступ: http://94.228.123.86:8000",
         "🤖 Telegram бот: ЗАПУЩЕН",
         "📊 Мониторинг сервисов: АКТИВЕН",
