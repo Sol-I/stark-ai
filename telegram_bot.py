@@ -124,32 +124,16 @@ class TelegramBot:
         API: Запуск Telegram бота
         Вход: None
         Выход: None (блокирующий вызов)
-        Логика: Создает отдельный event loop, настраивает обработчики, запускает polling
+        Логика: Простой запуск без создания event loop
         """
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        application = Application.builder().token(self.token).build()
 
-            application = Application.builder().token(self.token).build()
+        application.add_handler(CommandHandler("start", self.start))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+        application.add_error_handler(self.handle_error)
 
-            # Добавляем обработчики
-            application.add_handler(CommandHandler("start", self.start))
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-
-            # Добавляем обработчик ошибок
-            application.add_error_handler(self.handle_error)
-
-            add_activity_log("INFO", "Запуск Telegram бота")
-            logger.info("Telegram bot starting...")
-
-            application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-
-        except Exception as e:
-            error_msg = f"Критическая ошибка Telegram бота: {e}"
-            add_activity_log("ERROR", error_msg)
-            logger.error(error_msg)
-            raise
-
+        logger.info("Telegram bot starting...")
+        application.run_polling()
 # Глобальный экземпляр для легкого доступа
 telegram_bot = TelegramBot()
 
