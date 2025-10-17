@@ -135,27 +135,22 @@ def get_db():
         db.close()
 
 
+# В database.py в функции add_activity_log
 def add_activity_log(level: str, message: str, user_id: str = None):
-    """
-    API: Добавление записи в лог активности
-    Вход: level (уровень логирования), message (сообщение), user_id (ID пользователя)
-    Выход: str (ID созданной записи лога) или None при ошибке
-    Логика: Создает запись лога с автоматическим timestamp и ID
-    """
+    print(f"🔍 DEBUG: Попытка записи лога: [{level}] {message}")  # ← ДОБАВИТЬ
     db = SessionLocal()
     try:
         log = LogEntry(level=level, message=message, user_id=user_id)
         db.add(log)
         db.commit()
-        print(f"📝 LOG [{level}]: {message}")
+        print(f"✅ DEBUG: Лог записан в БД: {log.id}")  # ← ДОБАВИТЬ
         return log.id
     except Exception as e:
-        print(f"❌ Ошибка записи лога: {e}")
+        print(f"❌ DEBUG: Ошибка записи лога: {e}")  # ← ДОБАВИТЬ
         db.rollback()
         return None
     finally:
         db.close()
-
 
 def get_recent_logs(limit: int = 10):
     """
