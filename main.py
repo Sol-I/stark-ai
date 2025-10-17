@@ -167,7 +167,7 @@ async def main():
     await asyncio.sleep(3)
 
     # Запускаем мониторинг сервисов
-    monitor_task = asyncio.create_task(monitor_services())
+    # monitor_task = asyncio.create_task(monitor_services())
 
     # Выводим информацию о запуске
     startup_info = [
@@ -203,13 +203,13 @@ async def main():
     except KeyboardInterrupt:
         add_activity_log("INFO", "Остановка агента по запросу пользователя", "system")
         logger.info("🛑 Остановка Stark AI Agent...")
-        monitor_task.cancel()
+        # monitor_task.cancel()
 
     except Exception as e:
         error_msg = f"Критическая ошибка в main: {e}"
         add_activity_log("ERROR", error_msg, "system")
         logger.error(error_msg)
-        monitor_task.cancel()
+        # monitor_task.cancel()
 
 
 if __name__ == "__main__":
