@@ -158,7 +158,7 @@ async def health_check():
 
 
 @app.get("/api/logs")
-async def get_recent_logs(limit: int = 50):
+async def get_recent_logs(limit: int = 15):
     """
     API: Получение последних логов для веб-интерфейса
     Вход: limit (количество логов, по умолчанию 50)
