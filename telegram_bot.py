@@ -9,6 +9,7 @@ API: Обработка команд и сообщений из Telegram
 
 import logging
 import asyncio
+import nest_asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from agent_core import AIAgent
@@ -33,12 +34,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 class TelegramBot:
     """
     Telegram Bot - интерфейс для мессенджера
     API: Обработка команд и сообщений из Telegram
     Основные возможности: асинхронная обработка сообщений, интеграция с AI Agent
     """
+
     def __init__(self, token: str = TELEGRAM_BOT_TOKEN):
         """
         API: Инициализация Telegram бота
@@ -48,8 +51,9 @@ class TelegramBot:
         """
         self.token = token
         self.agent = AIAgent()
-        add_activity_log("INFO", "Telegram бот инициализирован с собственным агентом")
-        logger.info("Telegram бот инициализирован с собственным агентом")
+        self.application = None
+        add_activity_log("INFO", "Telegram бот инициализирован", "system")
+        logger.info("Telegram бот инициализирован")
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -120,26 +124,47 @@ class TelegramBot:
         logger.error(f"Ошибка в Telegram боте: {error}")
 
     def run(self):
-        import asyncio
-        # Создаем event loop для этого потока
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        """
+        API: Запуск бота с правильной настройкой event loop для потоков
+        Вход: None
+        Выход: None (блокирующий вызов)
+        Логика: Создает отдельную event loop для потока бота с применением nest_asyncio
+        """
+        try:
+            # Применяем nest_asyncio для разрешения множественных event loops
+            nest_asyncio.apply()
 
-        application = Application.builder().token(self.token).build()
-        application.add_handler(CommandHandler("start", self.start))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-        application.add_error_handler(self.handle_error)
+            # Создаем новую event loop для этого потока
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
-        logger.info("Telegram bot starting...")
-        application.run_polling()
+            # Создаем приложение бота
+            self.application = Application.builder().token(self.token).build()
+            self.application.add_handler(CommandHandler("start", self.start))
+            self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+            self.application.add_error_handler(self.handle_error)
+
+            logger.info("Telegram bot starting with dedicated event loop...")
+            add_activity_log("INFO", "Telegram бот запускается с выделенной event loop", "system")
+
+            # Запускаем polling в созданной event loop
+            self.application.run_polling()
+
+        except Exception as e:
+            logger.error(f"Failed to start Telegram bot: {e}")
+            add_activity_log("ERROR", f"Ошибка запуска Telegram бота: {e}", "system")
+            raise
+
 
 # Глобальный экземпляр для легкого доступа
 telegram_bot = TelegramBot()
+
 
 def main():
     """Запуск бота напрямую"""
     bot = TelegramBot()
     bot.run()
+
 
 if __name__ == "__main__":
     main()
