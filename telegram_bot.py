@@ -132,7 +132,7 @@ class TelegramBot:
 
         logger.info("Telegram bot starting...")
         application.run_polling()
-        
+
 # Глобальный экземпляр для легкого доступа
 telegram_bot = TelegramBot()
 

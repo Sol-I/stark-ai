@@ -40,43 +40,30 @@ class LogEntry(Base):
 
 
 class ModificationTask(Base):
-    """
-    API: Модель задачи модификации кода с иерархической структурой
-    Вход: None (создается через конструктор)
-    Выход: None (хранит данные задачи модификации)
-    Логика: Поддерживает родительские/дочерние задачи, управление разрешениями, отслеживание статусов
-    """
     __tablename__ = 'modification_tasks'
-    __table_args__ = (
-        Index('idx_tasks_status', 'status'),
-        Index('idx_tasks_created', 'created_at'),
-        Index('idx_tasks_level', 'level'),
-        Index('idx_tasks_parent', 'parent_id'),
-    )
 
     # Идентификаторы
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    parent_id = Column(String(36), nullable=True)  # ID родительской задачи
+    parent_id = Column(String(36), nullable=True)
 
     # Данные модификации
-    file = Column(String, nullable=False)  # Файл для изменения
-    asis = Column(Text, nullable=True)  # Старый код (None = добавить tobe)
-    tobe = Column(Text, nullable=True)  # Новый код (None = удалить asis)
-    desc = Column(Text, nullable=False)  # Описание изменения
+    file = Column(String, nullable=False)
+    asis = Column(Text, nullable=True)
+    tobe = Column(Text, nullable=True)
+    description = Column(Text, nullable=False)  # Новое поле вместо desc
 
     # Управление доступом
-    level = Column(String, default="dev")  # dev (разработчик) или agent (система)
-    perm = Column(String, default="false")  # Разрешение разработчика: true/false
+    level = Column(String, default="dev")
+    perm = Column(String, default="false")
 
     # Статусы
-    status = Column(String, default="new")  # new, hold, ready, done
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # Время создания
-    completed_dt = Column(DateTime, nullable=True)  # Время реализации
-    error_message = Column(Text, nullable=True)  # Лог ошибки
+    status = Column(String, default="new")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    completed_dt = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
 
     def __repr__(self):
         return f"<ModificationTask({self.status}) {self.file}>"
-
 
 class LLMRequest(Base):
     """
@@ -187,24 +174,17 @@ def get_recent_logs(limit: int = 10):
 
 def create_modification_task(
         file: str,
-        desc: str,
+        description: str,  # ИСПРАВЛЕНО: desc -> description
         asis: str = None,
         tobe: str = None,
         parent_id: str = None,
         level: str = "dev"
 ) -> str:
-    """
-    API: Создание новой задачи модификации кода
-    Вход: file (путь к файлу), desc (описание), asis (старый код), tobe (новый код),
-          parent_id (ID родительской задачи), level (уровень доступа)
-    Выход: str (ID созданной задачи)
-    Логика: Создает задачу с указанными параметрами, автоматически устанавливает статус 'new'
-    """
     db = SessionLocal()
     try:
         task = ModificationTask(
             file=file,
-            desc=desc,
+            description=description,  # ИСПРАВЛЕНО: desc -> description
             asis=asis,
             tobe=tobe,
             parent_id=parent_id,
@@ -212,7 +192,7 @@ def create_modification_task(
         )
         db.add(task)
         db.commit()
-        add_activity_log("INFO", f"Создана задача модификации: {file} ({desc[:50]}...)", "system")
+        add_activity_log("INFO", f"Создана задача модификации: {file} ({description[:50]}...)", "system")
         return task.id
     except Exception as e:
         add_activity_log("ERROR", f"Ошибка создания задачи: {e}", "system")
@@ -220,7 +200,6 @@ def create_modification_task(
         raise
     finally:
         db.close()
-
 
 def update_task_status(task_id: str, status: str, error_message: str = None, perm: str = None):
     """
