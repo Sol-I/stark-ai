@@ -10,6 +10,8 @@ import time
 import json
 import aiohttp
 from typing import Dict, List, Tuple, Optional, Any
+import re
+import json
 
 # Конфигурация системы
 from config import (
@@ -20,9 +22,6 @@ from config import (
     API_STRATEGIES,
     API_ENDPOINTS
 )
-
-# Импорт системы логирования
-from database import add_activity_log, create_llm_request
 
 # Настройка логирования
 logging.basicConfig(
@@ -39,10 +38,10 @@ class AIAgent:
     Основные возможности: отказоустойчивость, многомодельность, трекинг использования, аналитика
     """
 
-    def __init__(self):
+    def __init__(self, log_callback=None, llm_request_callback=None):
         """
         API: Инициализация AI Agent
-        Вход: None
+        Вход: log_callback (функция логирования), llm_request_callback (функция записи LLM запросов)
         Выход: None (создает экземпляр агента)
         Логика: Инициализация кэшей, истории диалогов, метрик использования
         """
@@ -55,7 +54,11 @@ class AIAgent:
         self.last_request_time = 0
         self.min_request_interval = 0.1
 
-        add_activity_log("INFO", "AI Agent инициализирован (ленивая загрузка моделей)", "system")
+        # Callbacks для логирования
+        self.add_activity_log = log_callback or (lambda level, msg, user=None: print(f"[{level}] {msg}"))
+        self.create_llm_request = llm_request_callback or (lambda **kwargs: print(f"LLM Request: {kwargs}"))
+
+        self.add_activity_log("INFO", "AI Agent инициализирован (ленивая загрузка моделей)", "system")
         logger.info("AI Agent initialized with lazy model loading")
 
     async def ensure_initialized(self):
@@ -75,7 +78,7 @@ class AIAgent:
     async def _load_free_models_ranking(self):
         """С отладкой"""
         try:
-            add_activity_log("INFO", "Начало загрузки моделей из OpenRouter", "system")
+            self.add_activity_log("INFO", "Начало загрузки моделей из OpenRouter", "system")
 
             models = await self._fetch_models_from_openrouter()
             logger.info(f"Получено {len(models)} моделей из API")
@@ -100,12 +103,12 @@ class AIAgent:
 
             self.model_ranking = self._rank_models_by_parameters(free_models)
 
-            add_activity_log("INFO", f"Загружено {len(self.model_ranking)} бесплатных моделей", "system")
+            self.add_activity_log("INFO", f"Загружено {len(self.model_ranking)} бесплатных моделей", "system")
             logger.info(f"Топ-3 модели: {[m['name'] for m in self.model_ranking[:3]]}")
 
         except Exception as e:
             error_msg = f"Ошибка загрузки моделей: {e}"
-            add_activity_log("ERROR", error_msg, "system")
+            self.add_activity_log("ERROR", error_msg, "system")
             logger.error(error_msg)
             self.model_ranking = self._get_fallback_models()
 
@@ -176,7 +179,6 @@ class AIAgent:
             context_length = model.get('context_length', 0)
 
             # Ищем числа с суффиксами параметров
-            import re
             param_patterns = [
                 r'(\d+)b\b',  # 7b, 13b, 70b
                 r'(\d+)b\s+parameters',  # 7b parameters
@@ -248,7 +250,7 @@ class AIAgent:
             # Ленивая загрузка моделей при первом вызове
             await self.ensure_initialized()
 
-            add_activity_log("INFO", f"Получено сообщение через {endpoint}: '{message[:100]}...'", user_id)
+            self.add_activity_log("INFO", f"Получено сообщение через {endpoint}: '{message[:100]}...'", user_id)
 
             # Защита от слишком частых запросов
             await self._rate_limit_protection()
@@ -256,7 +258,7 @@ class AIAgent:
             # Инициализация сессии пользователя
             if user_id not in self.conversations:
                 self.conversations[user_id] = []
-                add_activity_log("DEBUG", f"Создана новая сессия пользователя", user_id)
+                self.add_activity_log("DEBUG", f"Создана новая сессия пользователя", user_id)
 
             # Обновление истории диалога
             current_history = self.conversations[user_id][-self.max_history:]
@@ -265,7 +267,7 @@ class AIAgent:
             # Последовательная попытка моделей по приоритету
             for model_index, model in enumerate(self.model_ranking):
                 model_info = f"{model['name']} ({model['api_provider']})"
-                add_activity_log("DEBUG", f"Попытка #{model_index + 1}: {model_info}", user_id)
+                self.add_activity_log("DEBUG", f"Попытка #{model_index + 1}: {model_info}", user_id)
 
                 response, success, prompt_tokens, completion_tokens = await self._try_model_request(
                     model, current_history, user_id, endpoint, process_type, process_details
@@ -275,21 +277,21 @@ class AIAgent:
                     # Успешный ответ - сохраняем историю и возвращаем результат
                     current_history.append({"role": "assistant", "content": response})
                     self.conversations[user_id] = current_history[-self.max_history:]
-                    add_activity_log("INFO", f"Успешный ответ от {model_info}", user_id)
+                    self.add_activity_log("INFO", f"Успешный ответ от {model_info}", user_id)
                     return response
                 else:
                     # Продолжаем ротацию при ошибках
-                    add_activity_log("INFO", f"Модель {model_info} недоступна", user_id)
+                    self.add_activity_log("INFO", f"Модель {model_info} недоступна", user_id)
                     continue
 
             # Все модели недоступны
             error_msg = "❌ Все модели временно недоступны. Попробуйте позже."
-            add_activity_log("ERROR", "Все модели в ротации недоступны", user_id)
+            self.add_activity_log("ERROR", "Все модели в ротации недоступны", user_id)
             return error_msg
 
         except Exception as e:
             error_msg = f"❌ Системная ошибка обработки сообщения: {str(e)}"
-            add_activity_log("ERROR", f"Критическая ошибка process_message: {e}", user_id)
+            self.add_activity_log("ERROR", f"Критическая ошибка process_message: {e}", user_id)
             return error_msg
 
     async def _try_model_request(self, model: Dict[str, Any], history: List[Dict],
@@ -306,7 +308,7 @@ class AIAgent:
         prompt = self._build_prompt(history)
 
         try:
-            add_activity_log("DEBUG", f"Запрос к {model['name']}", user_id)
+            self.add_activity_log("DEBUG", f"Запрос к {model['name']}", user_id)
 
             # Универсальный вызов API
             response, prompt_tokens, completion_tokens = await self._call_universal_api(model, prompt, user_id)
@@ -330,11 +332,11 @@ class AIAgent:
                     process_details=process_details
                 )
 
-                add_activity_log("INFO", f"Успешный ответ ({len(response)} символов)", user_id)
+                self.add_activity_log("INFO", f"Успешный ответ ({len(response)} символов)", user_id)
                 return response, True, prompt_tokens, completion_tokens
             else:
                 # Пустой ответ
-                add_activity_log("WARNING", f"Пустой ответ от модели", user_id)
+                self.add_activity_log("WARNING", f"Пустой ответ от модели", user_id)
                 return "Пустой ответ от модели", False, 0, 0
 
         except Exception as e:
@@ -428,7 +430,6 @@ class AIAgent:
                     headers[key] = value
 
             # Подготовка тела запроса
-            import json
             escaped_prompt = json.dumps(prompt)[1:-1]  # Убираем кавычки json.dumps
 
             body_template = json.dumps(strategy['body_template'])
@@ -545,7 +546,7 @@ class AIAgent:
             if estimated_limits is None:
                 estimated_limits = 80 if success else 30
 
-            request_id = create_llm_request(
+            request_id = self.create_llm_request(
                 user_id=user_id,
                 provider=provider,
                 model=model,
@@ -657,7 +658,7 @@ class AIAgent:
         """
         if user_id in self.conversations:
             del self.conversations[user_id]
-            add_activity_log("INFO", f"История диалога очищена для {user_id}", user_id)
+            self.add_activity_log("INFO", f"История диалога очищена для {user_id}", user_id)
             return True
         return False
 
@@ -712,10 +713,8 @@ async def test_agent():
             print(f"Ответ: {response}")
             print("-" * 50)
 
-        add_activity_log("INFO", "Тестирование агента завершено успешно", "system")
         return True
     except Exception as e:
-        add_activity_log("ERROR", f"Ошибка тестирования агента: {e}", "system")
         return False
 
 
