@@ -73,33 +73,33 @@ def start_telegram_bot():
         logger.error(error_msg)
 
 
-async def monitor_services():
-    """
-    API: Мониторинг состояния сервисов
-    Вход: None
-    Выход: None (периодическая проверка)
-    Логика: Проверка активности потоков сервера и бота, логирование состояния
-    """
-    while True:
-        try:
-            active_threads = threading.enumerate()
-            server_active = any('server' in str(t).lower() for t in active_threads)
-            telegram_active = any('telegram' in str(t).lower() for t in active_threads)
-
-            status_msg = f"Мониторинг: Сервер {'✅' if server_active else '❌'}, Telegram {'✅' if telegram_active else '❌'}"
-
-            if not server_active or not telegram_active:
-                add_activity_log("WARNING", status_msg, "system")
-            else:
-                add_activity_log("DEBUG", status_msg, "system")
-
-            await asyncio.sleep(60)  # Проверка каждую минуту
-
-        except Exception as e:
-            error_msg = f"Ошибка мониторинга: {e}"
-            add_activity_log("ERROR", error_msg, "system")
-            logger.error(error_msg)
-            await asyncio.sleep(30)
+# async def monitor_services():
+#     """
+#     API: Мониторинг состояния сервисов
+#     Вход: None
+#     Выход: None (периодическая проверка)
+#     Логика: Проверка активности потоков сервера и бота, логирование состояния
+#     """
+#     while True:
+#         try:
+#             active_threads = threading.enumerate()
+#             server_active = any('server' in str(t).lower() for t in active_threads)
+#             telegram_active = any('telegram' in str(t).lower() for t in active_threads)
+#
+#             status_msg = f"Мониторинг: Сервер {'✅' if server_active else '❌'}, Telegram {'✅' if telegram_active else '❌'}"
+#
+#             if not server_active or not telegram_active:
+#                 add_activity_log("WARNING", status_msg, "system")
+#             else:
+#                 add_activity_log("DEBUG", status_msg, "system")
+#
+#             await asyncio.sleep(60)  # Проверка каждую минуту
+#
+#         except Exception as e:
+#             error_msg = f"Ошибка мониторинга: {e}"
+#             add_activity_log("ERROR", error_msg, "system")
+#             logger.error(error_msg)
+#             await asyncio.sleep(30)
 
 
 async def main():
