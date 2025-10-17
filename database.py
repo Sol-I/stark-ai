@@ -408,13 +408,7 @@ def get_provider_limits_status(provider: str = None):
         return limits_status
 
     except Exception as e:
-        logger.error(f"Error getting provider limits: {e}")
+        add_activity_log("ERROR", f"Error getting provider limits: {e}", "database")
         return {}
     finally:
         db.close()
-
-
-# Настройка логирования для модуля
-import logging
-
-logger = logging.getLogger(__name__)
