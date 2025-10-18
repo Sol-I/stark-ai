@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from datetime import datetime, timezone
 from datetime import timedelta
 import uuid
+import inspect
 
 Base = declarative_base()
 
@@ -23,16 +24,12 @@ class LogEntry(Base):
     Логика: Автоматически генерирует ID и timestamp при создании
     """
     __tablename__ = 'logs'
-    __table_args__ = (
-        Index('idx_logs_timestamp', 'timestamp'),
-        Index('idx_logs_level', 'level'),
-        Index('idx_logs_user_id', 'user_id'),
-    )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     level = Column(String)  # INFO, ERROR, DEBUG, WARNING
     message = Column(Text)
     user_id = Column(String)
+    procedure = Column(String)  # НОВЫЙ СТОЛБЕЦ - имя процедуры
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     def __repr__(self):
@@ -73,13 +70,6 @@ class LLMRequest(Base):
     Логика: Трекинг использования лимитов, мониторинг ошибок и распределения запросов
     """
     __tablename__ = 'llm_requests'
-    __table_args__ = (
-        Index('idx_llm_timestamp', 'timestamp'),
-        Index('idx_llm_user_timestamp', 'user_id', 'timestamp'),
-        Index('idx_llm_provider_success', 'provider', 'success'),
-        Index('idx_llm_process_type', 'process_type'),
-        Index('idx_llm_error_type', 'error_type'),
-    )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String)  # Кто сделал запрос
@@ -135,23 +125,37 @@ def get_db():
         db.close()
 
 
-# В database.py в функции add_activity_log
 def add_activity_log(level: str, message: str, user_id: str = None):
-    print(f"🔍 DEBUG: Попытка записи лога: [{level}] {message}")  # ← ДОБАВИТЬ
+    """
+    API: Логирование активности с указанием процедуры-источника
+    Вход: level (уровень), message (сообщение), user_id (идентификатор пользователя)
+    Выход: str (ID созданной записи) или None при ошибке
+    Логика: Получает имя вызывающей процедуры через inspect и сохраняет в отдельном столбце
+    """
+    # Получаем имя вызывающей функции
+    caller_frame = inspect.currentframe().f_back
+    procedure_name = caller_frame.f_code.co_name if caller_frame else "unknown"
+
+    print(f"🔍 DEBUG: Попытка записи лога: [{level}] {procedure_name}: {message}")
     db = SessionLocal()
     try:
-        log = LogEntry(level=level, message=message, user_id=user_id)
+        log = LogEntry(
+            level=level,
+            message=message,
+            user_id=user_id,
+            procedure=procedure_name  # Сохраняем в отдельный столбец
+        )
         db.add(log)
         db.commit()
-        print(f"✅ DEBUG: Лог записан в БД: {log.id}")  # ← ДОБАВИТЬ
+        print(f"✅ DEBUG: Лог записан в БД: {log.id}")
         return log.id
     except Exception as e:
-        print(f"❌ DEBUG: Ошибка записи лога: {e}")  # ← ДОБАВИТЬ
+        print(f"❌ DEBUG: Ошибка записи лога: {e}")
         db.rollback()
         return None
     finally:
         db.close()
-
+        
 def get_recent_logs(limit: int = 10):
     """
     API: Получение последних записей лога
