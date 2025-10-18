@@ -7,16 +7,15 @@ API: Универсальный обработчик запросов к LLM п�
 import logging
 import asyncio
 import time
-import json
 import aiohttp
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Any
 import re
 import json
 
 # Конфигурация системы
-from config import (
-    OPENROUTER_API_KEY,
+from core.config.config import (
     DEEPSEEK_API_KEY,
+    OPENROUTER_API_KEY,
     MAX_HISTORY_LENGTH,
     REQUEST_TIMEOUT,
     API_STRATEGIES,

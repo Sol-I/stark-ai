@@ -9,16 +9,11 @@ import asyncio
 import threading
 import logging
 
-# Импорт конфигурации
-from config import HOST, PORT
-
-# Импорт системы логирования
-from database import add_activity_log
-
-# Импорт компонентов системы
-from server import run_server
-from telegram_bot import TelegramBot
-from agent_core import AIAgent
+from core.config.config import HOST, PORT
+from core.services.database.database import add_activity_log
+from core.services.server import run_server
+from core.services.telegram_bot import TelegramBot
+from core.agent.agent_core import AIAgent
 
 # Настройка логирования
 logging.basicConfig(

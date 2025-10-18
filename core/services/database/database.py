@@ -5,7 +5,7 @@ API: Управление базой данных PostgreSQL, CRUD операц�
 Основные возможности: автоматическое логирование, отслеживание задач модификации кода
 """
 
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Boolean, Integer, Index
+from sqlalchemy import create_engine, Column, String, DateTime, Text, Boolean, Integer
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime, timezone

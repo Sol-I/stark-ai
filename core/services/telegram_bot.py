@@ -9,9 +9,9 @@ import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-from database import add_activity_log
-from agent_core import ai_agent  # Глобальный агент
-from config import TELEGRAM_BOT_TOKEN
+from core.services.database.database import add_activity_log
+from core.agent.agent_core import ai_agent  # Глобальный агент
+from core.config.config import TELEGRAM_BOT_TOKEN
 
 logging.basicConfig(
     level=logging.INFO,

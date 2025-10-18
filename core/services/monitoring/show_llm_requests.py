@@ -3,7 +3,7 @@
 Скрипт для просмотра последних LLM запросов из БД
 """
 
-from database import get_recent_llm_requests
+from core.services.database.database import get_recent_llm_requests
 
 
 def show_recent_llm_requests(limit=20):

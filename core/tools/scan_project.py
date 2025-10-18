@@ -7,24 +7,23 @@ API: Сканирование структуры, извлечение доку�
 
 import re
 import argparse
-import subprocess
-from pathlib import Path
-from typing import List, Dict
+import pyperclip
 import sys
 import io
 import json
 import shutil
+from pathlib import Path
+from typing import List, Dict
 from datetime import datetime
+from sqlalchemy import text
+from core.config.config import TELEGRAM_BOT_TOKEN
+from core.services.database.database import SessionLocal
+from core.services.database.database import add_activity_log
+from core.services.database.database import get_recent_logs, get_recent_tasks, LogEntry, ModificationTask
+from datetime import timezone
 
 # Настройка кодировки
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-
-# Импорт системы логирования
-try:
-    from database import add_activity_log
-except ImportError:
-    def add_activity_log(level: str, message: str, user_id: str = None):
-        print(f"📝 [{level}] {message} (user: {user_id})")
 
 
 def _log_operation_start(operation: str):
@@ -54,14 +53,7 @@ def copy_to_clipboard(content: str, command: str):
     Выход: None
     Логика: Попытка копирования через pyperclip, только логирование в БД
     """
-    try:
-        import pyperclip
-        pyperclip.copy(content)
-        add_activity_log("INFO", f"{command} скопирован в буфер обмена ({len(content)} символов)")
-    except ImportError:
-        add_activity_log("WARNING", f"{command} - pyperclip недоступен")
-    except Exception as e:
-        add_activity_log("ERROR", f"Ошибка копирования в буфер: {e}")
+    pyperclip.copy(content)
 
 
 class ProjectScanner:
@@ -392,17 +384,12 @@ def get_database_ddl():
     Выход: str (SQL DDL для всех таблиц, индексов, constraints)
     Логика: Запрос системных каталогов PostgreSQL для генерации полного DDL
     """
+    db = SessionLocal()
     try:
-        from database import SessionLocal
-        from datetime import datetime
-        from sqlalchemy import text  # ✅ Добавляем text
-
-        db = SessionLocal()
-        try:
-            # SQL для получения DDL всех таблиц
-            ddl_queries = [
-                # DDL для таблиц
-                text("""
+        # SQL для получения DDL всех таблиц
+        ddl_queries = [
+            # DDL для таблиц
+            text("""
                 SELECT 
                     '-- Table: ' || n.nspname || '.' || c.relname || E'\n' ||
                     'CREATE TABLE ' || n.nspname || '.' || c.relname || E' (\n' ||
@@ -435,31 +422,25 @@ def get_database_ddl():
                 GROUP BY n.nspname, c.relname, c.oid
                 ORDER BY n.nspname, c.relname
                 """)
-            ]
+        ]
 
-            # ✅ Исправляем устаревший datetime.utcnow()
-            from datetime import timezone
-            current_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-            full_ddl = ["-- PostgreSQL DDL for Stark AI Database", f"-- Generated on: {current_time}", ""]
+        current_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        full_ddl = ["-- PostgreSQL DDL for Stark AI Database", f"-- Generated on: {current_time}", ""]
 
-            for query in ddl_queries:
-                result = db.execute(query)
-                for row in result:
-                    if row[0] and row[0].strip():
-                        full_ddl.append(row[0])
-                        full_ddl.append("")
+        for query in ddl_queries:
+            result = db.execute(query)
+            for row in result:
+                if row[0] and row[0].strip():
+                    full_ddl.append(row[0])
+                    full_ddl.append("")
 
-            return "\n".join(full_ddl)
+        return "\n".join(full_ddl)
 
-        except Exception as e:
-            return f"-- Error generating DDL: {e}"
-        finally:
-            db.close()
-
-    except ImportError:
-        return "-- Database module not available"
     except Exception as e:
-        return f"-- Error connecting to database: {e}"
+        return f"-- Error generating DDL: {e}"
+    finally:
+        db.close()
+
 
 def scan_full_code():
     """
@@ -521,9 +502,6 @@ def generate_project_context():
     """
     _log_operation_start("генерация технического контекста проекта")
 
-    import json
-    from datetime import datetime
-
     context = {
         "generated_at": datetime.now().isoformat(),
         "project": {},
@@ -549,113 +527,90 @@ def generate_project_context():
         add_activity_log("ERROR", f"Ошибка сканирования проекта: {e}")
 
     # 2. Системные данные
-    try:
-        from database import get_recent_logs, get_recent_tasks, SessionLocal, LogEntry, ModificationTask
-    except ImportError as e:
-        context["database"]["error"] = f"Модуль БД недоступен: {e}"
-    except Exception as e:
-        context["database"]["error"] = f"Ошибка загрузки БД: {e}"
-    else:
-        db = None
-        try:
-            db = SessionLocal()
+    db = SessionLocal()
 
-            log_count = db.query(LogEntry).count()
-            recent_logs = get_recent_logs(5)
+    log_count = db.query(LogEntry).count()
+    recent_logs = get_recent_logs(5)
 
-            task_count = db.query(ModificationTask).count()
-            recent_tasks = get_recent_tasks(5)
+    task_count = db.query(ModificationTask).count()
+    recent_tasks = get_recent_tasks(5)
 
-            context["database"] = {
-                "log_entries_total": log_count,
-                "modification_tasks_total": task_count,
-                "recent_logs": [
-                    {
-                        "level": log.level,
-                        "message": log.message[:100] + "..." if len(log.message) > 100 else log.message,
-                        "user_id": log.user_id,
-                        "timestamp": log.timestamp.isoformat()
-                    }
-                    for log in recent_logs
-                ],
-                "recent_tasks": [
-                    {
-                        "file": task.file,
-                        "status": task.status,
-                        "level": task.level,
-                        "desc": task.desc[:100] + "..." if len(task.desc) > 100 else task.desc
-                    }
-                    for task in recent_tasks
-                ]
+    context["database"] = {
+        "log_entries_total": log_count,
+        "modification_tasks_total": task_count,
+        "recent_logs": [
+            {
+                "level": log.level,
+                "message": log.message[:100] + "..." if len(log.message) > 100 else log.message,
+                "user_id": log.user_id,
+                "timestamp": log.timestamp.isoformat()
             }
-            add_activity_log("INFO", f"Данные БД получены: {log_count} логов, {task_count} задач")
+            for log in recent_logs
+        ],
+        "recent_tasks": [
+            {
+                "file": task.file,
+                "status": task.status,
+                "level": task.level,
+                "desc": task.desc[:100] + "..." if len(task.desc) > 100 else task.desc
+            }
+            for task in recent_tasks
+        ]
+    }
+    add_activity_log("INFO", f"Данные БД получены: {log_count} логов, {task_count} задач")
 
-        except Exception as e:
-            context["database"]["error"] = f"Ошибка подключения к БД: {e}"
-        finally:
-            if db:
-                db.close()
+    db.close()
 
     # 3. Статус системы
-    try:
-        from config import TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY
-
-        context["system_status"] = {
-            "telegram_bot_configured": bool(TELEGRAM_BOT_TOKEN),
-            "openai_configured": bool(OPENAI_API_KEY),
-            "anthropic_configured": bool(ANTHROPIC_API_KEY),
-            "google_configured": bool(GOOGLE_API_KEY),
-        }
-        add_activity_log("INFO", "Статус системы получен")
-
-    except Exception as e:
-        context["system_status"]["error"] = str(e)
-        add_activity_log("ERROR", f"Ошибка получения статуса системы: {e}")
+    context["system_status"] = {
+        "telegram_bot_configured": bool(TELEGRAM_BOT_TOKEN)
+    }
+    add_activity_log("INFO", "Статус системы получен")
 
     # 4. НОВОЕ: Добавляем DDL базы данных
     context["database_ddl"] = get_database_ddl()
 
     # Форматируем в Markdown
     markdown_output = f"""# Stark AI Project - Technical Context
-
-## 📊 Project Overview
-- **Generated**: {context['generated_at']}
-- **Python Files**: {context['project'].get('file_count', 'N/A')}
-- **Main Modules**: {', '.join(context['project'].get('main_files', []))}
-- **Status**: {'✅ Success' if 'error' not in context['project'] else '❌ ' + context['project']['error']}
-
-## 🗄️ Database Status
-- **Total Logs**: {context['database'].get('log_entries_total', 'N/A')}
-- **Total Tasks**: {context['database'].get('modification_tasks_total', 'N/A')}
-- **Status**: {'✅ Connected' if 'error' not in context['database'] else '❌ ' + context['database']['error']}
-
-## 🔧 System Configuration
-- **Telegram Bot**: {'✅ Configured' if context['system_status'].get('telegram_bot_configured') else '❌ Not configured'}
-- **OpenAI API**: {'✅ Configured' if context['system_status'].get('openai_configured') else '❌ Not configured'}
-- **Anthropic API**: {'✅ Configured' if context['system_status'].get('anthropic_configured') else '❌ Not configured'}
-- **Google AI API**: {'✅ Configured' if context['system_status'].get('google_configured') else '❌ Not configured'}
-
-## 📁 Project Structure
-{context['project'].get('structure', 'N/A')}
-
-## 📋 API Documentation
-{context['project'].get('api_documentation', 'N/A')}
-
-## 🗃️ Database DDL
-{context['database_ddl']}
     
-
-## 📊 Recent Activity
-
-### Last 5 Logs:
-{chr(10).join(f"- **{log['level']}** {log['timestamp'][11:19]} {log['message']} (user: {log['user_id'] or 'system'})" for log in context['database'].get('recent_logs', [])) if 'recent_logs' in context['database'] else '📭 No log data available'}
-
-### Last 5 Tasks:
-{chr(10).join(f"- **{task['status']}** {task['file']} - {task['desc']}" for task in context['database'].get('recent_tasks', [])) if 'recent_tasks' in context['database'] else '📭 No task data available'}
-
----
-*Context automatically generated by Stark AI System*
-"""
+    ## 📊 Project Overview
+    - **Generated**: {context['generated_at']}
+    - **Python Files**: {context['project'].get('file_count', 'N/A')}
+    - **Main Modules**: {', '.join(context['project'].get('main_files', []))}
+    - **Status**: {'✅ Success' if 'error' not in context['project'] else '❌ ' + context['project']['error']}
+    
+    ## 🗄️ Database Status
+    - **Total Logs**: {context['database'].get('log_entries_total', 'N/A')}
+    - **Total Tasks**: {context['database'].get('modification_tasks_total', 'N/A')}
+    - **Status**: {'✅ Connected' if 'error' not in context['database'] else '❌ ' + context['database']['error']}
+    
+    ## 🔧 System Configuration
+    - **Telegram Bot**: {'✅ Configured' if context['system_status'].get('telegram_bot_configured') else '❌ Not configured'}
+    - **OpenAI API**: {'✅ Configured' if context['system_status'].get('openai_configured') else '❌ Not configured'}
+    - **Anthropic API**: {'✅ Configured' if context['system_status'].get('anthropic_configured') else '❌ Not configured'}
+    - **Google AI API**: {'✅ Configured' if context['system_status'].get('google_configured') else '❌ Not configured'}
+    
+    ## 📁 Project Structure
+    {context['project'].get('structure', 'N/A')}
+    
+    ## 📋 API Documentation
+    {context['project'].get('api_documentation', 'N/A')}
+    
+    ## 🗃️ Database DDL
+    {context['database_ddl']}
+        
+    
+    ## 📊 Recent Activity
+    
+    ### Last 5 Logs:
+    {chr(10).join(f"- **{log['level']}** {log['timestamp'][11:19]} {log['message']} (user: {log['user_id'] or 'system'})" for log in context['database'].get('recent_logs', [])) if 'recent_logs' in context['database'] else '📭 No log data available'}
+    
+    ### Last 5 Tasks:
+    {chr(10).join(f"- **{task['status']}** {task['file']} - {task['desc']}" for task in context['database'].get('recent_tasks', [])) if 'recent_tasks' in context['database'] else '📭 No task data available'}
+    
+    ---
+    *Context automatically generated by Stark AI System*
+    """
 
     _log_operation_result("генерация технического контекста", markdown_output)
     return markdown_output

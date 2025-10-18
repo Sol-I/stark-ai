@@ -13,8 +13,8 @@ from pydantic import BaseModel
 import logging
 
 # Импорт системы логирования
-from database import add_activity_log
-from agent_core import AIAgent
+from core.services.database.database import add_activity_log, get_recent_logs
+from core.agent.agent_core import AIAgent
 
 # Настройка логирования
 logging.basicConfig(
@@ -99,8 +99,6 @@ async def health_check():
 
 @app.get("/api/logs")
 async def get_recent_logs(limit: int = 15):
-    try:
-        from database import get_recent_logs
         logs = get_recent_logs(limit)
         formatted_logs = []
         for log in logs:
@@ -111,9 +109,6 @@ async def get_recent_logs(limit: int = 15):
                 'timestamp': log.timestamp.strftime('%H:%M:%S') if log.timestamp else 'unknown'
             })
         return {"logs": formatted_logs, "status": "success", "total": len(formatted_logs)}
-    except Exception as e:
-        logger.error(f"Ошибка получения логов: {e}")
-        return {"logs": [], "status": "error", "error": str(e)}
 
 @app.get("/api/models")
 async def get_available_models():

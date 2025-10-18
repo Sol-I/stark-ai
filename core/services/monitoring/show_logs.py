@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from database import get_recent_logs
+from core.services.database.database import get_recent_logs
 
 if __name__ == "__main__":
     logs = get_recent_logs(50)
