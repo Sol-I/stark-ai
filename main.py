@@ -7,27 +7,23 @@ API: Запуск и координация всех компонентов Star
 
 import asyncio
 import threading
-import time
 import logging
-from datetime import datetime
 
 # Импорт конфигурации
 from config import HOST, PORT
 
 # Импорт системы логирования
-try:
-    from database import add_activity_log
-except ImportError:
-    def add_activity_log(level: str, message: str, user_id: str = None):
-        print(f"📝 [{level}] {message} (user: {user_id})")
+from database import add_activity_log
+
+# Импорт компонентов системы
+from server import run_server
+from telegram_bot import TelegramBot
+from agent_core import AIAgent
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
@@ -40,7 +36,6 @@ def start_server():
     Логика: Импорт и запуск веб-сервера с обработкой ошибок
     """
     try:
-        from server import run_server
         add_activity_log("INFO", f"Запуск FastAPI сервера на {HOST}:{PORT}...", "system")
         logger.info(f"🚀 Starting FastAPI server on {HOST}:{PORT}...")
         run_server(host=HOST, port=PORT)
@@ -62,7 +57,6 @@ def start_telegram_bot():
     Логика: Импорт и запуск Telegram бота с обработкой ошибок
     """
     try:
-        from telegram_bot import TelegramBot
         add_activity_log("INFO", "Запуск Telegram бота...", "system")
         logger.info("🤖 Starting Telegram bot...")
         bot = TelegramBot()
@@ -71,35 +65,6 @@ def start_telegram_bot():
         error_msg = f"Ошибка Telegram бота: {e}"
         add_activity_log("ERROR", error_msg, "system")
         logger.error(error_msg)
-
-
-# async def monitor_services():
-#     """
-#     API: Мониторинг состояния сервисов
-#     Вход: None
-#     Выход: None (периодическая проверка)
-#     Логика: Проверка активности потоков сервера и бота, логирование состояния
-#     """
-#     while True:
-#         try:
-#             active_threads = threading.enumerate()
-#             server_active = any('server' in str(t).lower() for t in active_threads)
-#             telegram_active = any('telegram' in str(t).lower() for t in active_threads)
-#
-#             status_msg = f"Мониторинг: Сервер {'✅' if server_active else '❌'}, Telegram {'✅' if telegram_active else '❌'}"
-#
-#             if not server_active or not telegram_active:
-#                 add_activity_log("WARNING", status_msg, "system")
-#             else:
-#                 add_activity_log("DEBUG", status_msg, "system")
-#
-#             await asyncio.sleep(60)  # Проверка каждую минуту
-#
-#         except Exception as e:
-#             error_msg = f"Ошибка мониторинга: {e}"
-#             add_activity_log("ERROR", error_msg, "system")
-#             logger.error(error_msg)
-#             await asyncio.sleep(30)
 
 
 async def main():
@@ -118,7 +83,6 @@ async def main():
 
     # Показываем информацию о системе
     try:
-        from agent_core import AIAgent
         agent = AIAgent()
         await agent.ensure_initialized()
 
@@ -135,7 +99,6 @@ async def main():
 
     # Инициализируем агента
     try:
-        from agent_core import AIAgent
         agent = AIAgent()
         add_activity_log("INFO", "AI Agent инициализирован", "system")
     except Exception as e:
@@ -165,9 +128,6 @@ async def main():
 
     # Даем время сервисам на запуск
     await asyncio.sleep(3)
-
-    # Запускаем мониторинг сервисов
-    # monitor_task = asyncio.create_task(monitor_services())
 
     # Выводим информацию о запуске
     startup_info = [
@@ -203,13 +163,11 @@ async def main():
     except KeyboardInterrupt:
         add_activity_log("INFO", "Остановка агента по запросу пользователя", "system")
         logger.info("🛑 Остановка Stark AI Agent...")
-        # monitor_task.cancel()
 
     except Exception as e:
         error_msg = f"Критическая ошибка в main: {e}"
         add_activity_log("ERROR", error_msg, "system")
         logger.error(error_msg)
-        # monitor_task.cancel()
 
 
 if __name__ == "__main__":

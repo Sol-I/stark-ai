@@ -155,7 +155,7 @@ def add_activity_log(level: str, message: str, user_id: str = None):
         return None
     finally:
         db.close()
-        
+
 def get_recent_logs(limit: int = 10):
     """
     API: Получение последних записей лога
