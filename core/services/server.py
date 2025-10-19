@@ -99,7 +99,8 @@ async def health_check():
 
 @app.get("/api/logs")
 async def get_recent_logs(limit: int = 15):
-        logs = get_recent_logs(limit)
+        from core.services.database.database import get_recent_logs as get_logs_from_db
+        logs = get_logs_from_db(limit)
         formatted_logs = []
         for log in logs:
             formatted_logs.append({
